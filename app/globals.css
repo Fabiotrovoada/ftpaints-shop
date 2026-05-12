@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+:root {
+  --ftblue: #004475;
+  --ftaccent: #ff8f00;
+  --ftaccent-light: #fb923c;
+  --ftblack: #0a0a0a;
+  --color-ftblue: #004475;
+  --color-ftaccent: #ff8f00;
+}
+
+body {
+  background-color: #f4f6f9;
+  color: #111827;
+}
+
+.btn-primary {
+  background-color: #004475;
+  color: white;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s;
+  cursor: pointer;
+}
+.btn-primary:hover { background-color: #003360; }
+
+.btn-accent {
+  background-color: #ff8f00;
+  color: white;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  transition: background-color 0.15s;
+  cursor: pointer;
+}
+.btn-accent:hover { background-color: #e07d00; }
+
+.btn-outline {
+  border: 1.5px solid #004475;
+  color: #004475;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  transition: all 0.15s;
+  cursor: pointer;
+  background: white;
+}
+.btn-outline:hover { background-color: #004475; color: white; }
+
+.card {
+  background: white;
+  border-radius: 0.75rem;
+  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.07);
+  border: 1px solid #e8edf3;
+}
+
+.badge-stock {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.125rem 0.5rem;
+  border-radius: 0.25rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.badge-instock  { background: #dcfce7; color: #166534; }
+.badge-available { background: #dbeafe; color: #1e40af; }
+.badge-lowstock  { background: #fef3c7; color: #92400e; }
+
+/* Remove number input spinners */
+input[type=number]::-webkit-inner-spin-button,
+input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

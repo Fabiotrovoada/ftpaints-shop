@@ -1,0 +1,264 @@
+// Odoo client for FTPaints Trade Portal
+// Mobile API v1 for auth, products, categories, cart
+// JSON-RPC (with web session) for invoices, orders, partner
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
+const ODOO_URL = process.env.ODOO_URL!;
+const ODOO_DB = process.env.ODOO_DB!;
+
+// ─── Mobile API helpers ───────────────────────────────────────────────────────
+// Per API docs: ALL endpoints use Content-Type: application/json
+// GET requests still send a JSON body with user_id + auth_token
+
+async function mobileGet(
+  endpoint: string,
+  authPayload: Record<string, unknown>,
+  extra: Record<string, unknown> = {}
+): Promise<unknown> {
+  const url = `${ODOO_URL}${endpoint}`;
+  const res = await fetch(url, {
+    method: 'GET',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...authPayload, ...extra }),
+  });
+  const data = (await res.json()) as { jsonrpc?: string; result?: unknown; error?: { message: string } };
+  if (data.error) throw new Error(data.error.message);
+  // Mobile API wraps in jsonrpc result OR returns directly
+  return data.result !== undefined ? data.result : data;
+}
+
+async function mobilePost(
+  endpoint: string,
+  body: Record<string, unknown>
+): Promise<unknown> {
+  const res = await fetch(`${ODOO_URL}${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json()) as { jsonrpc?: string; result?: unknown; error?: { message: string } };
+  if (data.error) throw new Error(data.error.message);
+  return data.result !== undefined ? data.result : data;
+}
+
+// ─── Admin token (for catalog browsing) ──────────────────────────────────────
+interface AdminToken { user_id: number; auth_token: string }
+let _adminToken: AdminToken | null = null;
+let _adminTokenExpiry = 0;
+
+async function getAdminToken(): Promise<AdminToken> {
+  if (_adminToken && Date.now() < _adminTokenExpiry) return _adminToken;
+  const login = process.env.ODOO_ADMIN_EMAIL!;
+  const password = process.env.ODOO_ADMIN_PASSWORD!;
+  const result = (await mobilePost('/api/v1/sign_in', { login, password })) as {
+    success?: boolean; user_id?: number; auth_token?: string;
+  };
+  if (!result?.success || !result.user_id || !result.auth_token) {
+    throw new Error('Admin Mobile API sign_in failed');
+  }
+  _adminToken = { user_id: result.user_id, auth_token: result.auth_token };
+  _adminTokenExpiry = Date.now() + 3_600_000; // 1 hour
+  return _adminToken;
+}
+
+// ─── Web Session (JSON-RPC for invoices, orders, partner) ────────────────────
+interface WebSession { cookies: string; expiresAt: number }
+let _webSession: WebSession | null = null;
+
+async function getWebSession(): Promise<string> {
+  if (_webSession && Date.now() < _webSession.expiresAt) return _webSession.cookies;
+  const login = process.env.ODOO_ADMIN_EMAIL!;
+  const password = process.env.ODOO_ADMIN_PASSWORD!;
+  const res = await fetch(`${ODOO_URL}/web/session/authenticate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0', method: 'call', id: 1,
+      params: { db: ODOO_DB, login, password },
+    }),
+  });
+  const rawCookies = res.headers.get('set-cookie') || '';
+  const data = (await res.json()) as { result?: { uid?: number } };
+  if (!data.result?.uid) throw new Error(`Web session authenticate failed for ${login}`);
+  const sessionMatch = rawCookies.match(/session_id=([^;]+)/);
+  const cookieHeader = sessionMatch ? `session_id=${sessionMatch[1]}` : rawCookies;
+  _webSession = { cookies: cookieHeader, expiresAt: Date.now() + 3_600_000 };
+  return cookieHeader;
+}
+
+let _rpcId = 1;
+async function jsonrpcCallKw(
+  model: string,
+  method: string,
+  args: unknown[],
+  kwargs: Record<string, unknown> = {}
+): Promise<unknown> {
+  const cookies = await getWebSession();
+  const res = await fetch(`${ODOO_URL}/web/dataset/call_kw`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: cookies },
+    body: JSON.stringify({
+      jsonrpc: '2.0', method: 'call', id: _rpcId++,
+      params: { model, method, args, kwargs: { ...kwargs, context: {} } },
+    }),
+  });
+  const data = (await res.json()) as { result?: unknown; error?: { data?: { message?: string }; message?: string } };
+  if (data.error) {
+    const msg = data.error.data?.message || data.error.message || 'RPC error';
+    throw new Error(msg);
+  }
+  if (method === 'read' && Array.isArray(data.result)) return data.result[0] || null;
+  return data.result;
+}
+
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+
+export async function authenticate(
+  email: string,
+  password: string
+): Promise<{ user_id: number; auth_token: string } | false> {
+  try {
+    // Try trade partner login first, then regular
+    for (const endpoint of ['/api/v1/sign_in_partner', '/api/v1/sign_in']) {
+      const result = (await mobilePost(endpoint, { login: email, password })) as {
+        success?: boolean; user_id?: number; auth_token?: string;
+      };
+      if (result?.success && result.user_id && result.auth_token) {
+        return { user_id: result.user_id, auth_token: result.auth_token };
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+// ─── Partner ─────────────────────────────────────────────────────────────────
+
+export async function getPartnerByUid(uid: number, _password: string): Promise<Record<string, unknown>> {
+  try {
+    const rows = (await jsonrpcCallKw('res.users', 'read', [[uid]], {
+      fields: ['name', 'email', 'partner_id', 'company_id'],
+    })) as Record<string, unknown> | null;
+    return rows ?? {};
+  } catch { return {}; }
+}
+
+export async function getPartnerInfo(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown> | null> {
+  try {
+    return (await jsonrpcCallKw('res.partner', 'read', [[partnerId]], {
+      fields: ['name', 'email', 'phone', 'street', 'city', 'zip', 'country_id',
+               'credit', 'credit_limit', 'property_payment_term_id'],
+    })) as Record<string, unknown> | null;
+  } catch { return null; }
+}
+
+// ─── Products (Mobile API) ────────────────────────────────────────────────────
+
+export async function getProducts(
+  _uid: number,
+  _password: string,
+  options: {
+    search?: string;
+    categoryId?: number;
+    inStockOnly?: boolean;
+    offset?: number;
+    limit?: number;
+    sort?: string;
+  } = {}
+) {
+  const admin = await getAdminToken();
+  const limit = options.limit || 25;
+  const page = Math.floor((options.offset || 0) / limit) + 1;
+
+  if (options.search) {
+    const result = (await mobileGet(`/api/v1/search/${page}`, admin, {
+      search_term: options.search,
+      ...(options.inStockOnly ? { show_in_stock_only: true } : {}),
+    })) as { products?: unknown[]; itemCount?: number };
+    return { products: result?.products || [], total: result?.itemCount ?? 0 };
+  }
+
+  const filterBy: Record<string, unknown> = {};
+  if (options.categoryId) filterBy.categ_id = options.categoryId;
+
+  const result = (await mobileGet(`/api/v1/all_product_template/${page}`, admin, {
+    filter_by: filterBy,
+    ...(options.inStockOnly ? { available_in_stock: true } : {}),
+  })) as { product_templates?: unknown[]; itemCount?: number };
+
+  const products = result?.product_templates || [];
+  return { products, total: result?.itemCount ?? 0 };
+}
+
+export async function getProductById(_uid: number, _password: string, id: number) {
+  const admin = await getAdminToken();
+  const result = (await mobileGet(`/api/v1/product_template/${id}`, admin)) as Record<string, unknown>;
+  return result || null;
+}
+
+export async function getCategories(_uid: number, _password: string) {
+  const admin = await getAdminToken();
+  const result = (await mobileGet('/api/v1/get_categories', admin)) as {
+    categories?: Record<string, unknown>[];
+  };
+  return result?.categories || [];
+}
+
+// ─── Orders ───────────────────────────────────────────────────────────────────
+
+export async function getSaleOrders(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown>[]> {
+  try {
+    return (await jsonrpcCallKw('sale.order', 'search_read', [
+      [['partner_id', '=', partnerId], ['state', 'in', ['sale', 'done']]],
+    ], {
+      fields: ['id', 'name', 'date_order', 'amount_total', 'state', 'order_line'],
+      order: 'date_order desc', limit: 50,
+    })) as Record<string, unknown>[] ?? [];
+  } catch { return []; }
+}
+
+export async function getSaleOrderLines(_uid: number, _password: string, orderId: number) {
+  try {
+    return await jsonrpcCallKw('sale.order.line', 'search_read', [
+      [['order_id', '=', orderId]],
+    ], { fields: ['product_id', 'product_uom_qty', 'price_unit', 'price_subtotal', 'name'] });
+  } catch { return []; }
+}
+
+export async function createSaleOrder(
+  _uid: number, _password: string, partnerId: number,
+  lines: Array<{ productId: number; qty: number; price: number }>, note?: string
+) {
+  const orderLines = lines.map((l) => [0, 0, {
+    product_id: l.productId, product_uom_qty: l.qty, price_unit: l.price,
+  }]);
+  return await jsonrpcCallKw('sale.order', 'create', [{
+    partner_id: partnerId, order_line: orderLines, note: note || '',
+  }]) as number;
+}
+
+// ─── Invoices ─────────────────────────────────────────────────────────────────
+
+export async function getInvoices(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown>[]> {
+  try {
+    return (await jsonrpcCallKw('account.move', 'search_read', [
+      [['partner_id', '=', partnerId], ['move_type', '=', 'out_invoice'], ['state', '=', 'posted']],
+    ], {
+      fields: ['id', 'name', 'invoice_date', 'invoice_date_due', 'amount_total',
+               'amount_residual', 'payment_state', 'state'],
+      order: 'invoice_date desc', limit: 50,
+    })) as Record<string, unknown>[] ?? [];
+  } catch { return []; }
+}
+
+// ─── Invoice PDF ──────────────────────────────────────────────────────────────
+
+export async function getInvoicePdf(_uid: number, _password: string, invoiceId: number): Promise<ArrayBuffer> {
+  const cookies = await getWebSession();
+  const pdfRes = await fetch(`${ODOO_URL}/report/pdf/account.report_invoice/${invoiceId}`, {
+    headers: { Cookie: cookies },
+  });
+  if (!pdfRes.ok) throw new Error(`Odoo report returned ${pdfRes.status}`);
+  return pdfRes.arrayBuffer();
+}
