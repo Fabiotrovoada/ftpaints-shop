@@ -1,0 +1,21 @@
+{
+  "headers": {
+    "content-type": "application/vnd.deno.reg.v2+json",
+    "via": "HTTP/1.1 ams.vultr.prod.deno-cluster.net",
+    "date": "Wed, 22 Jul 2026 07:05:26 GMT",
+    "cross-origin-opener-policy": "same-origin",
+    "x-deno-trace-id": "991eeb17e0cb6805a4fe8ed8f61aefd5",
+    "cross-origin-embedder-policy": "same-origin",
+    "x-content-type-options": "nosniff",
+    "cache-status": "deno; hit",
+    "content-length": "1618",
+    "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
+    "x-frame-options": "DENY",
+    "cross-origin-resource-policy": "same-origin",
+    "server": "deployd",
+    "age": "24572",
+    "cache-control": "max-age=86400",
+    "referrer-policy": "strict-origin-when-cross-origin"
+  },
+  "url": "https://deno.land/.well-known/deno-import-intellisense.json"
+}

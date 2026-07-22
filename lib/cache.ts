@@ -1,0 +1,41 @@
+/**
+ * Simple in-memory cache with TTL
+ * Prevents hammering Odoo on every request
+ */
+
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const store = new Map<string, CacheEntry<unknown>>();
+
+export function cacheGet<T>(key: string): T | null {
+  const entry = store.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    store.delete(key);
+    return null;
+  }
+  return entry.data as T;
+}
+
+export function cacheSet<T>(key: string, data: T, ttlSeconds: number): void {
+  store.set(key, { data, expiresAt: Date.now() + ttlSeconds * 1000 });
+}
+
+export function cacheDelete(pattern: string): void {
+  for (const key of store.keys()) {
+    if (key.includes(pattern)) store.delete(key);
+  }
+}
+
+// TTL constants
+export const TTL = {
+  PRODUCTS: 300,      // 5 min — product list
+  PRODUCT: 600,       // 10 min — single product
+  CATEGORIES: 3600,   // 1 hour — categories/brands rarely change
+  ORDERS: 60,         // 1 min — orders
+  INVOICES: 120,      // 2 min — invoices
+  SESSION: 30,        // 30 sec — session/auth
+};
