@@ -33,6 +33,7 @@ export default function Navbar() {
 
   const navLinks = [
     { href: '/shop', label: 'Shop' },
+    { href: '/buy-again', label: 'Buy Again' },
     { href: '/replenishment', label: 'Replenishment' },
     { href: '/account', label: 'My Account' },
   ];

@@ -27,7 +27,7 @@ export default function BasketPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price })),
+          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colourName: i.colourName, colourCode: i.colourCode })),
           note,
         }),
       });
@@ -112,6 +112,9 @@ export default function BasketPage() {
                       <Link href={`/shop/${item.id}`} className="text-sm font-semibold text-gray-900 hover:text-[#004475] hover:underline leading-tight block">
                         {item.name}
                       </Link>
+                      {(item.colourName || item.colourCode) && (
+                        <p className="text-xs text-[#004475] mt-0.5">🎨 {[item.colourName, item.colourCode].filter(Boolean).join(' · ')}</p>
+                      )}
                     </div>
                     {/* Remove button top-right */}
                     <button onClick={() => removeItem(item.id)} className="text-gray-300 hover:text-red-400 transition-colors flex-shrink-0 p-0.5 mt-0.5">

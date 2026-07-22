@@ -16,8 +16,8 @@ export async function POST(req: NextRequest) {
     const partnerId = (user?.partner_id as [number, string])?.[0];
     if (!partnerId) return NextResponse.json({ error: 'Partner not found' }, { status: 400 });
 
-    const orderId = await createSaleOrder(uid, password, partnerId, lines, note);
-    return NextResponse.json({ orderId });
+    const order = await createSaleOrder(uid, password, partnerId, lines, note);
+    return NextResponse.json({ orderId: order.id, orderName: order.name });
   } catch (err) {
     console.error('Order creation error:', err);
     return NextResponse.json({ error: 'Failed to create order' }, { status: 500 });

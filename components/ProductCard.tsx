@@ -65,10 +65,15 @@ export default function ProductCard({ product }: { product: Product }) {
   const exactQty = product.qty_available < 999 ? product.qty_available : null;
   const lowStock = inStock && exactQty !== null && exactQty <= 5;
   const isFav = isFavourite(product.id);
+  // FT Custom Mixed Paints are bespoke — no quantity breaks (shown or applied)
+  const categoryName = Array.isArray(product.categ_id) ? product.categ_id[1] : '';
+  const hideBreaks = categoryName.includes('FT Custom Mixed Paints');
   // Use real quantity breaks from Odoo if available, otherwise generate standard breaks
-  const breaks = (product.quantity_breaks && product.quantity_breaks.length > 0)
-    ? product.quantity_breaks
-    : getQuantityBreaks(product.list_price);
+  const breaks = hideBreaks
+    ? []
+    : (product.quantity_breaks && product.quantity_breaks.length > 0)
+      ? product.quantity_breaks
+      : getQuantityBreaks(product.list_price);
 
   // Current price based on qty
   const currentBreak = [...breaks].reverse().find(b => qty >= b.qty);
@@ -161,25 +166,29 @@ export default function ProductCard({ product }: { product: Product }) {
         </div>
 
         {/* Quantity breaks toggle */}
-        <button
-          onClick={() => setShowBreaks(!showBreaks)}
-          className="text-left text-xs text-[#004475] font-medium hover:underline"
-        >
-          Quantity breaks {showBreaks ? '▲' : '▼'}
-        </button>
+        {!hideBreaks && (
+          <>
+            <button
+              onClick={() => setShowBreaks(!showBreaks)}
+              className="text-left text-xs text-[#004475] font-medium hover:underline"
+            >
+              Quantity breaks {showBreaks ? '▲' : '▼'}
+            </button>
 
-        {showBreaks && (
-          <div className="bg-[#004475] rounded-lg p-2 text-xs space-y-1">
-            <div className="flex justify-between text-white/70">
-              <span>1+</span><span className="font-medium">£{product.list_price.toFixed(2)}</span>
-            </div>
-            {breaks.map(b => (
-              <div key={b.qty} className={`flex justify-between ${qty >= b.qty ? 'text-[#ff8f00] font-semibold' : 'text-white'}`}>
-                <span>{b.qty}+</span>
-                <span>£{b.price.toFixed(2)} <span className="text-white/50">(-{((product.list_price-b.price)/product.list_price*100).toFixed(0)}%)</span></span>
+            {showBreaks && (
+              <div className="bg-[#004475] rounded-lg p-2 text-xs space-y-1">
+                <div className="flex justify-between text-white/70">
+                  <span>1+</span><span className="font-medium">£{product.list_price.toFixed(2)}</span>
+                </div>
+                {breaks.map(b => (
+                  <div key={b.qty} className={`flex justify-between ${qty >= b.qty ? 'text-[#ff8f00] font-semibold' : 'text-white'}`}>
+                    <span>{b.qty}+</span>
+                    <span>£{b.price.toFixed(2)} <span className="text-white/50">(-{((product.list_price-b.price)/product.list_price*100).toFixed(0)}%)</span></span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
 
         {/* Stock status */}

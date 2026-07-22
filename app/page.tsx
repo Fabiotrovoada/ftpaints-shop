@@ -16,7 +16,7 @@ export default function LoginPage() {
     setError('');
     const res = await signIn('credentials', { email, password, redirect: false });
     if (res?.ok) {
-      router.push('/shop');
+      router.push('/buy-again');
     } else {
       setError('Invalid email or password. Please try again.');
     }

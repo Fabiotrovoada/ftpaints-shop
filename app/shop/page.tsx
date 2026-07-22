@@ -110,7 +110,7 @@ export default function ShopPage() {
   const [page, setPage]               = useState(0);
   const [sort, setSort]               = useState('name asc');
 
-  const limit = 24;
+  const limit = 18;
 
   // Load categories once
   useEffect(() => {
@@ -493,10 +493,10 @@ export default function ShopPage() {
             {/* Pagination */}
             {totalPages > 1 && (
               <div className="flex items-center justify-center gap-2 mt-8">
-                <button onClick={() => setPage(p=>Math.max(0,p-1))} disabled={page===0}
+                <button onClick={() => { setPage(p=>Math.max(0,p-1)); window.scrollTo({ top: 0, behavior: 'smooth' }); }} disabled={page===0}
                   className="btn-outline text-sm disabled:opacity-40 px-4 py-2">← Prev</button>
                 <span className="text-sm text-gray-500 px-4">Page {page+1} of {totalPages}</span>
-                <button onClick={() => setPage(p=>Math.min(totalPages-1,p+1))} disabled={page>=totalPages-1}
+                <button onClick={() => { setPage(p=>Math.min(totalPages-1,p+1)); window.scrollTo({ top: 0, behavior: 'smooth' }); }} disabled={page>=totalPages-1}
                   className="btn-outline text-sm disabled:opacity-40 px-4 py-2">Next →</button>
               </div>
             )}

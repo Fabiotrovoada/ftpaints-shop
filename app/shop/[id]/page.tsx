@@ -54,6 +54,8 @@ export default function ProductDetailPage() {
   const [added, setAdded] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'specs'>('details');
   const [selectedVariant, setSelectedVariant] = useState<VariantOption | null>(null);
+  const [colourName, setColourName] = useState('');
+  const [colourCode, setColourCode] = useState('');
 
   // Variants: group by attribute name
   const variants = product?.variant_ids || [];
@@ -63,7 +65,14 @@ export default function ProductDetailPage() {
   const activePrice = selectedVariant ? selectedVariant.price : (product?.list_price || 0);
   const activeCode = selectedVariant?.internal_reference || (product?.default_code as string) || '';
 
-  const breaks = product ? (
+  // FT Custom Mixed Paints are bespoke: no quantity breaks, plus a customer
+  // colour spec captured onto the order.
+  const categoryName = Array.isArray(product?.categ_id) ? product.categ_id[1] : '';
+  const isCustomMixed = categoryName.includes('FT Custom Mixed Paints');
+  const hideBreaks = isCustomMixed;
+  // Require at least one of the two colour fields before adding a custom paint.
+  const colourMissing = isCustomMixed && !colourName.trim() && !colourCode.trim();
+  const breaks = (product && !hideBreaks) ? (
     (product.quantity_breaks && product.quantity_breaks.length > 0)
       ? product.quantity_breaks
       : [
@@ -93,6 +102,7 @@ export default function ProductDetailPage() {
 
   function handleAdd() {
     if (!product) return;
+    if (colourMissing) return;
     const variantSuffix = selectedVariant && hasVariants ? ` (${selectedVariant.merged_name})` : '';
     addItem({
       id: selectedVariant ? selectedVariant.id : product.id,
@@ -100,7 +110,9 @@ export default function ProductDetailPage() {
       code: activeCode,
       price: currentPrice,
       qty,
-      image: product.image_url || product.image_128
+      image: product.image_url || product.image_128,
+      colourName: isCustomMixed ? colourName.trim() || undefined : undefined,
+      colourCode: isCustomMixed ? colourCode.trim() || undefined : undefined,
     });
     setAdded(true);
     setTimeout(() => setAdded(false), 2000);
@@ -238,25 +250,58 @@ export default function ProductDetailPage() {
               </div>
 
               {/* Quantity breaks */}
-              <div className="mt-3 pt-3 border-t border-gray-200">
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">📊 Quantity Breaks</p>
-                <div className="flex gap-2 flex-wrap">
-                  {[{qty:1, price: product.list_price}, ...breaks].map(b => (
-                    <button
-                      key={b.qty}
-                      onClick={() => setQty(b.qty)}
-                      className={`text-xs px-3 py-1.5 rounded-lg border font-medium transition-all ${
-                        qty >= b.qty && (!breaks.find(br => br.qty > b.qty && qty >= br.qty))
-                          ? 'border-[#ff8f00] bg-[#ff8f00] text-[#004475]'
-                          : 'border-gray-200 text-gray-600 hover:border-[#004475]'
-                      }`}
-                    >
-                      {b.qty}+ = £{b.price.toFixed(2)}
-                    </button>
-                  ))}
+              {!hideBreaks && (
+                <div className="mt-3 pt-3 border-t border-gray-200">
+                  <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">📊 Quantity Breaks</p>
+                  <div className="flex gap-2 flex-wrap">
+                    {[{qty:1, price: product.list_price}, ...breaks].map(b => (
+                      <button
+                        key={b.qty}
+                        onClick={() => setQty(b.qty)}
+                        className={`text-xs px-3 py-1.5 rounded-lg border font-medium transition-all ${
+                          qty >= b.qty && (!breaks.find(br => br.qty > b.qty && qty >= br.qty))
+                            ? 'border-[#ff8f00] bg-[#ff8f00] text-[#004475]'
+                            : 'border-gray-200 text-gray-600 hover:border-[#004475]'
+                        }`}
+                      >
+                        {b.qty}+ = £{b.price.toFixed(2)}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
+
+            {/* Custom colour spec (FT Custom Mixed Paints only) */}
+            {isCustomMixed && (
+              <div className="bg-white rounded-xl border border-gray-200 p-4">
+                <p className="text-sm font-semibold text-gray-700">🎨 Custom Colour Details</p>
+                <p className="text-xs text-gray-500 mt-0.5 mb-3">Tell us the colour to mix — enter a name, a code, or both.</p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Colour name</label>
+                    <input
+                      value={colourName}
+                      onChange={e => setColourName(e.target.value)}
+                      placeholder="e.g. Gentian Blue"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-500 mb-1">Colour code</label>
+                    <input
+                      value={colourCode}
+                      onChange={e => setColourCode(e.target.value)}
+                      placeholder="e.g. RAL 5010"
+                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                    />
+                  </div>
+                </div>
+                {colourMissing && (
+                  <p className="text-xs text-amber-600 mt-2">Enter a colour name or code to add this custom paint to your basket.</p>
+                )}
+              </div>
+            )}
 
             {/* Qty + Add */}
             <div className="flex gap-3">
@@ -266,8 +311,8 @@ export default function ProductDetailPage() {
                   className="w-14 text-center py-3 focus:outline-none text-sm font-medium" />
                 <button onClick={() => setQty(q => q+1)} className="px-3 py-3 bg-gray-50 hover:bg-gray-100 font-bold text-gray-600">+</button>
               </div>
-              <button onClick={handleAdd}
-                className={`flex-1 py-3 font-bold rounded-xl transition-all text-sm ${added ? 'bg-green-500 text-white' : 'bg-[#004475] hover:bg-[#ff8f00] text-white'}`}>
+              <button onClick={handleAdd} disabled={colourMissing}
+                className={`flex-1 py-3 font-bold rounded-xl transition-all text-sm ${added ? 'bg-green-500 text-white' : 'bg-[#004475] hover:bg-[#ff8f00] text-white'} disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-[#004475]`}>
                 {added ? '✓ Added to Basket' : `Add to Basket — £${(currentPrice * qty).toFixed(2)}`}
               </button>
               <button onClick={() => product && toggle(product.id)}

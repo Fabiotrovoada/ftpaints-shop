@@ -282,32 +282,49 @@ export async function getProducts(
 ) {
   const admin = await getAdminToken();
   const limit = options.limit || 25;
-  const page = Math.floor((options.offset || 0) / limit) + 1;
+  const offset = options.offset || 0;
 
-  let rawProducts: MobileProduct[] = [];
-  let total = 0;
-
-  if (options.search) {
-    const result = (await mobileGet(`/api/v1/search/${page}`, admin, {
-      search_term: options.search,
-      ...(options.inStockOnly ? { show_in_stock_only: true } : {}),
-    })) as { products?: MobileProduct[]; itemCount?: number };
-    rawProducts = result?.products || [];
-    total = result?.itemCount ?? rawProducts.length;
-  } else {
+  // Fetch a single Mobile-API page (1-indexed) for the current filters.
+  async function fetchMobilePage(pageNum: number): Promise<{ rows: MobileProduct[]; total: number }> {
+    if (options.search) {
+      const result = (await mobileGet(`/api/v1/search/${pageNum}`, admin, {
+        search_term: options.search,
+        ...(options.inStockOnly ? { show_in_stock_only: true } : {}),
+      })) as { products?: MobileProduct[]; itemCount?: number };
+      const rows = result?.products || [];
+      return { rows, total: result?.itemCount ?? rows.length };
+    }
     const filterBy: Record<string, unknown> = {};
     if (options.categoryId) filterBy.categ_id = options.categoryId;
-
-    const result = (await mobileGet(`/api/v1/all_product_template/${page}`, admin, {
+    const result = (await mobileGet(`/api/v1/all_product_template/${pageNum}`, admin, {
       filter_by: filterBy,
       ...(options.inStockOnly ? { available_in_stock: true } : {}),
     })) as { product_templates?: MobileProduct[]; itemCount?: number };
-
-    rawProducts = result?.product_templates || [];
-    total = result?.itemCount ?? rawProducts.length;
+    const rows = result?.product_templates || [];
+    return { rows, total: result?.itemCount ?? rows.length };
   }
 
-  let products = rawProducts.map(normalizeMobileProduct);
+  // The Mobile API paginates by page number with a fixed, server-controlled page
+  // size that ignores our display `limit`. Learn that size from page 1, then fetch
+  // exactly the page(s) spanning our [offset, offset+limit) window and slice it
+  // precisely — so the grid shows `limit` items per page and never skips products
+  // at the page seams.
+  const page1 = await fetchMobilePage(1);
+  const total = page1.total;
+  const serverPageSize = page1.rows.length || limit;
+
+  const startPage = Math.floor(offset / serverPageSize) + 1;
+  const endPage = Math.floor((offset + limit - 1) / serverPageSize) + 1;
+
+  const collected: MobileProduct[] = [];
+  for (let pg = startPage; pg <= endPage; pg++) {
+    const rows = pg === 1 ? page1.rows : (await fetchMobilePage(pg)).rows;
+    collected.push(...rows);
+    if (rows.length < serverPageSize) break; // reached the final, short page
+  }
+
+  const windowStart = offset - (startPage - 1) * serverPageSize;
+  let products = collected.slice(windowStart, windowStart + limit).map(normalizeMobileProduct);
 
   // Sort client-side since Mobile API doesn't support sorting
   if (options.sort) {
@@ -540,16 +557,126 @@ export async function getSaleOrderLines(_uid: number, _password: string, orderId
   } catch { return []; }
 }
 
+// Products the partner has previously ordered, resolved from order-line
+// VARIANTs to product.template objects in ProductCard-ready shape,
+// most-recently-purchased first.
+export async function getPreviouslyPurchasedProducts(
+  _uid: number, _password: string, partnerId: number
+): Promise<{ products: Record<string, unknown>[] }> {
+  try {
+    if (!partnerId) return { products: [] };
+
+    // 1. The partner's orders, newest first. Portal checkout creates orders as
+    //    draft quotations (staff confirm them later), so we include every state
+    //    except cancelled — matching getSaleOrders' "all the customer's orders".
+    const orders = (await jsonrpcCallKw('sale.order', 'search_read', [
+      [['partner_id', '=', partnerId], ['state', '!=', 'cancel']],
+      ['id'],
+    ], { order: 'date_order desc', limit: 100, context: {} })) as { id: number }[] ?? [];
+    const orderIds = orders.map(o => o.id);
+    if (orderIds.length === 0) return { products: [] };
+
+    // 2. Order lines → distinct variant ids, preserving most-recent-first order
+    const lines = (await jsonrpcCallKw('sale.order.line', 'search_read', [
+      [['order_id', 'in', orderIds], ['product_id', '!=', false]],
+      ['product_id'],
+    ], { order: 'id desc', context: {} })) as { product_id: [number, string] | false }[] ?? [];
+    const variantIds: number[] = [];
+    const seenVariant = new Set<number>();
+    for (const l of lines) {
+      const vid = Array.isArray(l.product_id) ? l.product_id[0] : null;
+      if (vid && !seenVariant.has(vid)) { seenVariant.add(vid); variantIds.push(vid); }
+    }
+    if (variantIds.length === 0) return { products: [] };
+
+    // 3. Resolve variants → templates, preserving order & de-duplicating
+    const variants = (await jsonrpcCallKw('product.product', 'read', [variantIds], {
+      fields: ['product_tmpl_id'],
+    })) as { id: number; product_tmpl_id: [number, string] | false }[] | { id: number; product_tmpl_id: [number, string] | false } | null;
+    const variantRows = Array.isArray(variants) ? variants : variants ? [variants] : [];
+    const variantToTmpl = new Map<number, number>();
+    for (const v of variantRows) {
+      if (Array.isArray(v.product_tmpl_id)) variantToTmpl.set(v.id, v.product_tmpl_id[0]);
+    }
+    const tmplIds: number[] = [];
+    const seenTmpl = new Set<number>();
+    for (const vid of variantIds) {
+      const tid = variantToTmpl.get(vid);
+      if (tid && !seenTmpl.has(tid)) { seenTmpl.add(tid); tmplIds.push(tid); }
+    }
+    if (tmplIds.length === 0) return { products: [] };
+
+    // 4. Read templates in ProductCard shape (same mapping as getProductsByTag)
+    const rawProducts = (await jsonrpcCallKw('product.template', 'search_read', [
+      [['id', 'in', tmplIds]],
+      [
+        'id', 'name', 'default_code', 'list_price', 'standard_price',
+        'qty_available', 'virtual_available', 'categ_id', 'uom_id',
+        'image_128', 'product_tag_ids', 'type', 'barcode',
+      ],
+    ], { context: {} })) as MobileProduct[];
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const p of rawProducts) {
+      const imageUrl = p.image_128
+        ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128`
+        : null;
+      byId.set(p.id, {
+        id: p.id,
+        name: p.name,
+        default_code: p.default_code || false,
+        list_price: p.list_price || 0,
+        standard_price: p.standard_price || 0,
+        qty_available: p.qty_available || 0,
+        virtual_available: p.virtual_available || 0,
+        categ_id: p.categ_id || false,
+        uom_id: p.uom_id || false,
+        image_128: null,
+        image_url: imageUrl,
+        product_tag_ids: p.product_tag_ids || [],
+        type: p.type || 'consu',
+        barcode: p.barcode || '',
+      });
+    }
+
+    // 5. Re-order to match purchase recency (search_read ignores our ordering)
+    const products = tmplIds.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
+    return { products };
+  } catch { return { products: [] }; }
+}
+
 export async function createSaleOrder(
   _uid: number, _password: string, partnerId: number,
-  lines: Array<{ productId: number; qty: number; price: number }>, note?: string
-) {
-  const orderLines = lines.map((l) => [0, 0, {
-    product_id: l.productId, product_uom_qty: l.qty, price_unit: l.price,
-  }]);
-  return await jsonrpcCallKw('sale.order', 'create', [{
+  lines: Array<{ productId: number; qty: number; price: number; name?: string; colourName?: string; colourCode?: string }>,
+  note?: string
+): Promise<{ id: number; name: string }> {
+  const orderLines = lines.map((l) => {
+    const line: Record<string, unknown> = {
+      product_id: l.productId, product_uom_qty: l.qty, price_unit: l.price,
+    };
+    // For bespoke custom-mixed paints, fold the customer's colour spec into the
+    // line description so it prints on the quotation the team mixes from.
+    const colourParts = [
+      l.colourName ? `Colour: ${l.colourName}` : '',
+      l.colourCode ? `Colour code: ${l.colourCode}` : '',
+    ].filter(Boolean);
+    if (colourParts.length) {
+      line.name = l.name ? `${l.name} — ${colourParts.join(', ')}` : colourParts.join(', ');
+    }
+    return [0, 0, line];
+  });
+  const id = await jsonrpcCallKw('sale.order', 'create', [{
     partner_id: partnerId, order_line: orderLines, note: note || '',
   }]) as number;
+  // Read back the human-friendly order reference (e.g. "S00123") for the
+  // customer to quote — e.g. as a bank-transfer payment reference.
+  let name = '';
+  try {
+    const rec = await jsonrpcCallKw('sale.order', 'read', [[id]], { fields: ['name'] }) as
+      | { id: number; name: string }[] | { id: number; name: string } | null;
+    const row = Array.isArray(rec) ? rec[0] : rec;
+    name = row?.name || '';
+  } catch { /* name is best-effort; id is authoritative */ }
+  return { id, name };
 }
 
 // ─── Invoices ─────────────────────────────────────────────────────────────────

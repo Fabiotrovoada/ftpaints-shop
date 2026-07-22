@@ -10,6 +10,9 @@ export interface BasketItem {
   qty: number;
   image?: string;
   qtyAvailable?: number;
+  // Bespoke colour spec for FT Custom Mixed Paints (customer-entered)
+  colourName?: string;
+  colourCode?: string;
 }
 
 interface BasketStore {

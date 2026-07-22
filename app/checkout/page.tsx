@@ -5,6 +5,12 @@ import { useRouter } from 'next/navigation';
 import Navbar from '@/components/Navbar';
 import { useBasket } from '@/lib/basketStore';
 
+const BANK_DETAILS: [string, string][] = [
+  ['Account Name', 'FT Paints Ltd'],
+  ['Sort Code', '04-06-05'],
+  ['Account Number', '20704785'],
+];
+
 const DELIVERY_METHODS = [
   {
     id: 'van',
@@ -116,6 +122,8 @@ export default function CheckoutPage() {
   const [note, setNote] = useState('');
   const [placing, setPlacing] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [orderRef, setOrderRef] = useState('');
+  const [placedTotal, setPlacedTotal] = useState(0);
   const [paymentError, setPaymentError] = useState('');
   const [deliveryAddress, setDeliveryAddress] = useState({ name: '', line1: '', line2: '', city: '', postcode: '' });
   const [savedAddress, setSavedAddress] = useState({ name: '', line1: '', line2: '', city: '', postcode: '' });
@@ -169,7 +177,7 @@ export default function CheckoutPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price })),
+          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colourName: i.colourName, colourCode: i.colourCode })),
           note: [
             note,
             deliveryMethod !== 'collection' ? `Delivery: ${selectedMethod.name}` : `Click & Collect [C&C Agreement signed by ${session?.user?.email} on ${new Date().toLocaleDateString('en-GB')}]`,
@@ -184,6 +192,9 @@ export default function CheckoutPage() {
       });
       const data = await res.json();
       if (data.orderId) {
+        // Capture reference + total before clearBasket() empties the basket.
+        setOrderRef(data.orderName || `#${data.orderId}`);
+        setPlacedTotal(totalIncVat);
         clearBasket();
         setSuccess(true);
         setStep('confirm');
@@ -225,6 +236,42 @@ export default function CheckoutPage() {
               📅 {deliveryMethod === 'collection' ? 'Collection' : 'Delivery'} booked for <strong>{deliverySlot.label}</strong> {deliverySlot.time && `— ${deliverySlot.time}`}
             </div>
           )}
+
+          {/* Order number */}
+          {orderRef && (
+            <div className="bg-gray-50 border border-gray-200 rounded-xl p-3 my-4 text-sm text-gray-600">
+              Order number: <strong className="text-gray-900 font-mono">{orderRef}</strong>
+            </div>
+          )}
+
+          {/* Bank transfer instructions */}
+          {paymentMethod === 'bank' && (
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-5 my-4 text-left">
+              <h3 className="font-bold text-blue-900 mb-1 flex items-center gap-2">🏦 Complete Your Bank Transfer</h3>
+              <p className="text-sm text-blue-700 mb-4">
+                Please transfer <strong>£{placedTotal.toFixed(2)}</strong> using the details below,
+                quoting your order number as the payment reference so we can match it to your order.
+              </p>
+              <div className="bg-white rounded-lg p-4 space-y-1 text-sm">
+                {[...BANK_DETAILS, ['Amount', `£${placedTotal.toFixed(2)}`] as [string, string]].map(([k, v]) => (
+                  <div key={k} className="flex justify-between py-1.5 border-b border-gray-100">
+                    <span className="text-gray-500">{k}</span>
+                    <span className="font-mono font-semibold text-gray-900">{v}</span>
+                  </div>
+                ))}
+                <div className="flex justify-between items-center py-1.5 pt-3">
+                  <span className="text-gray-500">Payment Reference</span>
+                  <span className="font-mono font-bold text-[#004475] text-base bg-[#ff8f00]/20 px-2 py-0.5 rounded">{orderRef}</span>
+                </div>
+              </div>
+              {['standard', 'next_day', 'express'].includes(deliveryMethod) && (
+                <p className="text-xs text-blue-600 mt-3">
+                  ⚠️ Your order will be dispatched once payment is received (1–2 working days).
+                </p>
+              )}
+            </div>
+          )}
+
           <p className="text-sm text-gray-400 mb-2">A confirmation will be sent to {session?.user?.email}</p>
           <p className="text-sm text-gray-400 mb-6">If any items are low or out of stock, our team will be in touch within 1 working day.</p>
           <div className="flex gap-3 justify-center">
@@ -731,9 +778,14 @@ export default function CheckoutPage() {
               <h3 className="font-bold text-gray-900 mb-3">Order Summary</h3>
               <div className="space-y-2 max-h-48 overflow-y-auto mb-3">
                 {items.map(item => (
-                  <div key={item.id} className="flex justify-between text-sm">
-                    <span className="text-gray-600 truncate flex-1 mr-2">{item.name.substring(0,35)} ×{item.qty}</span>
-                    <span className="font-medium text-gray-900 flex-shrink-0">£{(item.price * item.qty).toFixed(2)}</span>
+                  <div key={item.id} className="text-sm">
+                    <div className="flex justify-between">
+                      <span className="text-gray-600 truncate flex-1 mr-2">{item.name.substring(0,35)} ×{item.qty}</span>
+                      <span className="font-medium text-gray-900 flex-shrink-0">£{(item.price * item.qty).toFixed(2)}</span>
+                    </div>
+                    {(item.colourName || item.colourCode) && (
+                      <p className="text-xs text-[#004475]">🎨 {[item.colourName, item.colourCode].filter(Boolean).join(' · ')}</p>
+                    )}
                   </div>
                 ))}
               </div>
