@@ -142,6 +142,23 @@ export default function ShopPage() {
         'list_price desc': 'list_price desc',
         'default_code asc': 'default_code asc',
       };
+      // Favourites: ask the server for exactly the favourited templates, so the
+      // whole set shows regardless of catalogue pagination (not just the current page).
+      if (collection === 'favourites') {
+        const favArray = Array.from(favIds);
+        if (favArray.length === 0) {
+          setProducts([]);
+          setTotal(0);
+          return;
+        }
+        const favRes = await fetch(`/api/products?ids=${favArray.join(',')}`);
+        const favData = await favRes.json();
+        const favProds = Array.isArray(favData.products) ? favData.products : [];
+        setProducts(favProds);
+        setTotal(favProds.length);
+        return;
+      }
+
       const params = new URLSearchParams({
         search,
         inStockOnly: String(inStockOnly || collection === 'instock'),
@@ -155,12 +172,7 @@ export default function ShopPage() {
 
       const res = await fetch(`/api/products?${params}`);
       const data = await res.json();
-      let prods = Array.isArray(data.products) ? data.products : [];
-
-      // Filter favourites client-side
-      if (collection === 'favourites') {
-        prods = prods.filter((p: Product) => favIds.has(p.id));
-      }
+      const prods = Array.isArray(data.products) ? data.products : [];
 
       setProducts(prods);
       setTotal(data.total || 0);

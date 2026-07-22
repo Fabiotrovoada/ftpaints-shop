@@ -686,7 +686,7 @@ export default function CheckoutPage() {
                         ['Account Name', 'FT Paints Ltd'],
                         ['Sort Code', '04-06-05'],
                         ['Account Number', '20704785'],
-                        ['Reference', 'Your order number (shown after placing)'],
+                        ['Reference', 'Your order number (shown after placing order)'],
                       ].map(([k, v]) => (
                         <div key={k} className="flex justify-between py-1.5 border-b border-blue-100 last:border-0">
                           <span className="text-blue-600">{k}</span>

@@ -50,7 +50,7 @@ function getQuantityBreaks(price: number): QuantityBreak[] {
   ];
 }
 
-export default function ProductCard({ product }: { product: Product }) {
+export default function ProductCard({ product, onRemove }: { product: Product; onRemove?: () => void }) {
   const [qty, setQty] = useState(1);
   const [added, setAdded] = useState(false);
   const [showBreaks, setShowBreaks] = useState(false);
@@ -232,6 +232,15 @@ export default function ProductCard({ product }: { product: Product }) {
           >
             {added ? '✓ Added to Basket' : 'Add to Basket'}
           </button>
+          {/* Optional remove control (e.g. Buy Again — dismiss a product) */}
+          {onRemove && (
+            <button
+              onClick={onRemove}
+              className="w-full py-1.5 text-xs font-medium text-gray-400 hover:text-red-500 transition-colors"
+            >
+              ✕ Remove from Buy Again
+            </button>
+          )}
         </div>
       </div>
     </div>

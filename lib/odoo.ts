@@ -14,6 +14,7 @@ const ODOO_DB = process.env.ODOO_DB!;
 // Cloudflare WAF blocks GET+body without this header; Odoo rejects without the body.
 import * as https from 'https';
 import * as http from 'http';
+import { cacheGet, cacheSet, TTL } from './cache';
 
 function httpsGetWithBody(urlStr: string, body: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -532,6 +533,54 @@ export async function getProductsByTag(
   return { products, total };
 }
 
+/**
+ * Fetch specific product templates by id, in ProductCard shape. Used by the
+ * Favourites view, which holds a set of template ids and needs the full cards
+ * regardless of catalogue pagination. Result order matches the input `ids`.
+ */
+export async function getProductsByIds(ids: number[]): Promise<{ products: Record<string, unknown>[]; total: number }> {
+  if (!ids.length) return { products: [], total: 0 };
+  try {
+    const rawProducts = await jsonrpcCallKw('product.template', 'search_read', [
+      [['id', 'in', ids]],
+      [
+        'id', 'name', 'default_code', 'list_price', 'standard_price',
+        'qty_available', 'virtual_available', 'categ_id', 'uom_id',
+        'image_128', 'product_tag_ids', 'type', 'barcode',
+      ],
+    ], { context: {} }) as MobileProduct[];
+
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const p of rawProducts) {
+      const imageUrl = p.image_128
+        ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128`
+        : null;
+      byId.set(p.id, {
+        id: p.id,
+        name: p.name,
+        default_code: p.default_code || false,
+        list_price: p.list_price || 0,
+        standard_price: p.standard_price || 0,
+        qty_available: p.qty_available || 0,
+        virtual_available: p.virtual_available || 0,
+        categ_id: p.categ_id || false,
+        uom_id: p.uom_id || false,
+        image_128: null,
+        image_url: imageUrl,
+        product_tag_ids: p.product_tag_ids || [],
+        type: p.type || 'consu',
+        barcode: p.barcode || '',
+      });
+    }
+
+    // Preserve the caller's id order (search_read ignores it)
+    const products = ids.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
+    return { products, total: products.length };
+  } catch {
+    return { products: [], total: 0 };
+  }
+}
+
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
 export async function getSaleOrders(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown>[]> {
@@ -1016,6 +1065,7 @@ export interface PricelistItem {
   applied_on: '0_product_variant' | '1_product' | '2_product_category' | '3_global';
   product_tmpl_id: [number, string] | false;
   product_id: [number, string] | false;
+  categ_id: [number, string] | false;   // for '2_product_category' rules
   min_quantity: number;
   base: string;                // 'list_price', 'standard_price', 'pricelist'
   price: string;               // display string
@@ -1053,7 +1103,7 @@ export async function getPartnerPricelist(uid: number, _password: string): Promi
     const items = await jsonrpcCallKw('product.pricelist.item', 'search_read', [
       [['pricelist_id', '=', plId]],
       ['compute_price', 'percent_price', 'price_discount', 'applied_on',
-       'product_tmpl_id', 'product_id', 'min_quantity', 'base', 'price',
+       'product_tmpl_id', 'product_id', 'categ_id', 'min_quantity', 'base', 'price',
        'date_start', 'date_end'],
     ], {
       limit: 500,
@@ -1075,32 +1125,53 @@ export async function getPartnerPricelist(uid: number, _password: string): Promi
 /**
  * Apply pricelist rules to a product's price.
  * Handles: fixed, percentage discount, formula (cost-based).
+ *
+ * Rule matching priority (Odoo order): product template > product category > global.
+ * (Variant-level rules are skipped — we price at the template level.)
+ *
+ * `categAncestry` is the product's category chain, leaf-first (the product's own
+ * category, then its parent, grandparent, …). A '2_product_category' rule applies
+ * to a product whose category is the rule's category OR any descendant of it, so we
+ * match when the rule's category id appears anywhere in this chain. When several
+ * category rules match, the one nearest the leaf (smallest index) is the most
+ * specific and wins.
  */
 export function applyPricelist(
   pricelist: PricelistInfo,
   productTmplId: number,
   listPrice: number,
   costPrice: number,
-  qty: number = 1
+  qty: number = 1,
+  categAncestry: number[] = []
 ): number {
   const items = pricelist.items;
 
-  // Priority: variant > template > global
-  // Find best matching rule
+  // Depth of a category rule within the product's ancestry (leaf = 0 = most
+  // specific). Non-category rules return 0; unmatched category rules are filtered out.
+  const categDepth = (item: PricelistItem): number =>
+    item.applied_on === '2_product_category' && item.categ_id
+      ? categAncestry.indexOf(item.categ_id[0])
+      : 0;
+
+  // Priority: template > category > global. Find best matching rule.
   const candidates = items.filter(item => {
     if (item.min_quantity > qty) return false;
-    if (item.applied_on === '0_product_variant') return false; // skip variant-level for now (no variant id)
+    if (item.applied_on === '0_product_variant') return false; // skip variant-level (no variant id)
     if (item.applied_on === '1_product') return item.product_tmpl_id && item.product_tmpl_id[0] === productTmplId;
+    if (item.applied_on === '2_product_category') return !!item.categ_id && categAncestry.includes(item.categ_id[0]);
     if (item.applied_on === '3_global') return true;
     return false;
   });
 
-  // Sort: more specific first (template > global), then higher qty first
+  // Sort: more specific applied_on first, then (for category rules) nearest the
+  // leaf category, then higher min-qty first.
   candidates.sort((a, b) => {
-    const priority = { '1_product': 0, '3_global': 1 };
-    const pa = priority[a.applied_on as '1_product'|'3_global'] ?? 2;
-    const pb = priority[b.applied_on as '1_product'|'3_global'] ?? 2;
+    const priority = { '1_product': 0, '2_product_category': 1, '3_global': 2 };
+    const pa = priority[a.applied_on as keyof typeof priority] ?? 3;
+    const pb = priority[b.applied_on as keyof typeof priority] ?? 3;
     if (pa !== pb) return pa - pb;
+    const da = categDepth(a), db = categDepth(b);
+    if (da !== db) return da - db;
     return b.min_quantity - a.min_quantity;
   });
 
@@ -1129,5 +1200,81 @@ export function applyPricelist(
     }
     default:
       return listPrice;
+  }
+}
+
+/**
+ * Resolve each category id to its ancestry chain, leaf-first: the category itself,
+ * then parent, grandparent, … Uses product.category.parent_path (e.g. "1/7/23/").
+ * Returns a map of categoryId → [leaf, …, root].
+ */
+export async function getCategoryAncestries(categIds: number[]): Promise<Map<number, number[]>> {
+  const map = new Map<number, number[]>();
+  const ids = [...new Set(categIds.filter(id => id > 0))];
+  if (!ids.length) return map;
+  try {
+    const cats = await jsonrpcCallKw('product.category', 'read', [ids], {
+      fields: ['parent_path'],
+    }) as { id: number; parent_path?: string }[] | { id: number; parent_path?: string } | null;
+    const rows = Array.isArray(cats) ? cats : cats ? [cats] : [];
+    for (const c of rows) {
+      // parent_path "1/7/23/" → [23, 7, 1] (leaf-first)
+      const chain = (c.parent_path || '').split('/').filter(Boolean).map(Number).reverse();
+      map.set(c.id, chain.length ? chain : [c.id]);
+    }
+  } catch { /* no ancestry → category-level rules simply won't match */ }
+  return map;
+}
+
+/**
+ * Overlay the logged-in partner's pricelist onto a batch of product cards, in place.
+ * Sets each product's `list_price` to the partner's price when a rule matches, and
+ * keeps the pre-pricelist value in `original_price` so the UI can strike-through a
+ * cheaper deal. Leaves prices untouched when the partner has no pricelist or no rule
+ * matches, so existing special prices are never clobbered.
+ *
+ * This includes category-level rules ('2_product_category'): a product inherits the
+ * price of its own category or any ancestor category (most-specific wins).
+ */
+export async function applyPricelistToProducts(
+  uid: number,
+  password: string,
+  products: Record<string, unknown>[]
+): Promise<void> {
+  if (!uid || uid <= 0 || !products.length) return;
+
+  // Pricelist is per-partner and stable for minutes — cache it.
+  const plKey = `pricelist:${uid}`;
+  let pricelist = cacheGet<PricelistInfo | null>(plKey);
+  if (!pricelist) {
+    pricelist = await getPartnerPricelist(uid, password);
+    cacheSet(plKey, pricelist, TTL.PRODUCTS);
+  }
+  if (!pricelist || !pricelist.items.length) return;
+
+  // Category ancestry for every distinct leaf category in the batch.
+  const leafCatIds: number[] = [];
+  for (const p of products) {
+    const c = p.categ_id;
+    if (Array.isArray(c) && typeof c[0] === 'number') leafCatIds.push(c[0]);
+  }
+  const ancestryByCat = await getCategoryAncestries(leafCatIds);
+
+  for (const p of products) {
+    const tmplId = typeof p.id === 'number' ? p.id : Number(p.id);
+    if (!tmplId) continue;
+    const existing = typeof p.list_price === 'number' ? p.list_price : 0;
+    // Base = the true list price (pre special/pricelist). Mobile keeps the regular
+    // price in original_price; JSON-RPC paths only carry list_price.
+    const base = typeof p.original_price === 'number' ? p.original_price : existing;
+    const cost = typeof p.standard_price === 'number' ? p.standard_price : 0;
+    const cat = Array.isArray(p.categ_id) && typeof p.categ_id[0] === 'number' ? p.categ_id[0] : 0;
+    const ancestry = cat ? (ancestryByCat.get(cat) || [cat]) : [];
+
+    const priced = applyPricelist(pricelist, tmplId, base, cost, 1, ancestry);
+    p.original_price = base;
+    // Only override when the pricelist actually produced a different price, so a
+    // no-match (priced === base) preserves any existing special price.
+    p.list_price = priced !== base ? Math.round(priced * 100) / 100 : existing;
   }
 }
