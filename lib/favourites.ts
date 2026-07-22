@@ -24,7 +24,7 @@ export const useFavourites = create<FavouritesStore>()(
       storage: {
         getItem: (name) => {
           const str = localStorage.getItem(name);
-          if (!str) return null;
+          if (!str || str === 'null') return null;
           const data = JSON.parse(str);
           data.state.ids = new Set(data.state.ids);
           return data;
