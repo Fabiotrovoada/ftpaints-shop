@@ -149,7 +149,7 @@ export default function ShopPage() {
       }
 
       setProducts(prods);
-      setTotal(data.total || 0);
+      setTotal(collection === 'favourites' ? prods.length : (data.total || 0));
     } catch (err) {
       console.error(err);
     } finally {
