@@ -4,11 +4,21 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import Navbar from '@/components/Navbar';
-import { useBasket } from '@/lib/basketStore';
+import Footer from '@/components/Footer';
+import { useBasket, type BasketItem } from '@/lib/basketStore';
+
+// Resolve the per-unit colour list for a line, falling back to the legacy
+// single-colour fields for baskets persisted before the per-unit change.
+function colourList(item: BasketItem): Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }> {
+  if (item.colours?.length) return item.colours;
+  if (item.colourName || item.colourCode) return [{ name: item.colourName, code: item.colourCode }];
+  return [];
+}
 
 export default function BasketPage() {
-  const { items, updateQty, removeItem, clearBasket } = useBasket();
+  const { items, updateQty, removeItem, setColours, clearBasket } = useBasket();
   const total = items.reduce((s, i) => s + i.price * i.qty, 0);
+  const [editingId, setEditingId] = useState<number | null>(null);
   const [note, setNote] = useState('');
   const [placing, setPlacing] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -27,7 +37,7 @@ export default function BasketPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colourName: i.colourName, colourCode: i.colourCode })),
+          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colours: i.colours, colourName: i.colourName, colourCode: i.colourCode })),
           note,
         }),
       });
@@ -58,9 +68,9 @@ export default function BasketPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen flex flex-col bg-gray-50">
       <Navbar />
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="flex-1 w-full max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <h1 className="text-2xl font-bold text-gray-900 mb-6">Your Basket</h1>
 
         {items.length === 0 ? (
@@ -112,8 +122,20 @@ export default function BasketPage() {
                       <Link href={`/shop/${item.id}`} className="text-sm font-semibold text-gray-900 hover:text-[#004475] hover:underline leading-tight block">
                         {item.name}
                       </Link>
-                      {(item.colourName || item.colourCode) && (
-                        <p className="text-xs text-[#004475] mt-0.5">🎨 {[item.colourName, item.colourCode].filter(Boolean).join(' · ')}</p>
+                      {colourList(item).length > 0 && (
+                        <div className="mt-1 space-y-0.5">
+                          {colourList(item).map((c, ci) => (
+                            <div key={ci} className="text-xs text-[#004475]">
+                              <p>
+                                🎨 {colourList(item).length > 1 && <span className="font-semibold">{ci + 1}. </span>}
+                                {[c.name, c.code].filter(Boolean).join(' · ').toUpperCase()}
+                              </p>
+                              {[c.make, c.model, c.year].some(Boolean) && (
+                                <p className="text-gray-500 pl-4">🚗 {[c.make, c.model, c.year].filter(Boolean).join(' ')}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       )}
                     </div>
                     {/* Remove button top-right */}
@@ -136,13 +158,90 @@ export default function BasketPage() {
                   {/* Bottom row: price + qty controls + total */}
                   <div className="flex items-center justify-between gap-3">
                     <p className="text-sm text-[#004475] font-medium">£{item.price.toFixed(2)} each</p>
-                    <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
-                      <button onClick={() => updateQty(item.id, item.qty - 1)} className="px-3 py-1.5 bg-[#004475] hover:bg-[#003360] text-sm font-bold text-white">−</button>
-                      <span className="w-10 text-center text-sm py-1.5 font-medium">{item.qty}</span>
-                      <button onClick={() => updateQty(item.id, item.qty + 1)} className="px-3 py-1.5 bg-[#004475] hover:bg-[#003360] text-sm font-bold text-white">+</button>
-                    </div>
+                    {colourList(item).length > 0 ? (
+                      // Custom-mixed line: qty follows the number of colours — edit them inline.
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-gray-500">Qty {item.qty}</span>
+                        <button
+                          onClick={() => setEditingId(editingId === item.id ? null : item.id)}
+                          className="text-xs font-semibold text-[#004475] border border-[#004475]/30 hover:bg-[#004475]/5 rounded-lg px-3 py-1.5 transition-colors"
+                        >
+                          {editingId === item.id ? 'Done' : '✏️ Edit colours'}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex items-center border border-gray-200 rounded-lg overflow-hidden">
+                        <button onClick={() => updateQty(item.id, item.qty - 1)} className="px-3 py-1.5 bg-[#004475] hover:bg-[#003360] text-sm font-bold text-white">−</button>
+                        <span className="w-10 text-center text-sm py-1.5 font-medium">{item.qty}</span>
+                        <button onClick={() => updateQty(item.id, item.qty + 1)} className="px-3 py-1.5 bg-[#004475] hover:bg-[#003360] text-sm font-bold text-white">+</button>
+                      </div>
+                    )}
                     <p className="text-sm font-bold text-gray-900 text-right">£{(item.price * item.qty).toFixed(2)}</p>
                   </div>
+
+                  {/* Inline colour editor (custom-mixed lines) */}
+                  {editingId === item.id && colourList(item).length > 0 && (() => {
+                    const list = colourList(item);
+                    return (
+                      <div className="mt-3 pt-3 border-t border-gray-100 space-y-2">
+                        <p className="text-xs font-semibold text-gray-700">🎨 Edit colours to mix</p>
+                        {list.map((c, ci) => (
+                          <div key={ci} className="border border-gray-100 rounded-lg p-2 space-y-2">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs font-semibold text-[#004475] w-5 flex-shrink-0">{ci + 1}.</span>
+                              <input
+                                value={c.name ?? ''}
+                                onChange={e => setColours(item.id, list.map((x, j) => j === ci ? { ...x, name: e.target.value.toUpperCase() } : x))}
+                                placeholder="Colour name"
+                                className="flex-1 min-w-0 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                              />
+                              <input
+                                value={c.code ?? ''}
+                                onChange={e => setColours(item.id, list.map((x, j) => j === ci ? { ...x, code: e.target.value.toUpperCase() } : x))}
+                                placeholder="Code"
+                                className="w-24 flex-shrink-0 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                              />
+                              <button
+                                onClick={() => setColours(item.id, list.filter((_, j) => j !== ci))}
+                                disabled={list.length <= 1}
+                                title={list.length <= 1 ? 'A custom paint needs at least one colour' : 'Remove this colour'}
+                                className="text-gray-300 hover:text-red-400 disabled:opacity-30 disabled:hover:text-gray-300 flex-shrink-0 p-1"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12"/></svg>
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 pl-7">
+                              <input
+                                value={c.make ?? ''}
+                                onChange={e => setColours(item.id, list.map((x, j) => j === ci ? { ...x, make: e.target.value } : x))}
+                                placeholder="Make"
+                                className="min-w-0 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                              />
+                              <input
+                                value={c.model ?? ''}
+                                onChange={e => setColours(item.id, list.map((x, j) => j === ci ? { ...x, model: e.target.value } : x))}
+                                placeholder="Model"
+                                className="min-w-0 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                              />
+                              <input
+                                value={c.year ?? ''}
+                                onChange={e => setColours(item.id, list.map((x, j) => j === ci ? { ...x, year: e.target.value } : x))}
+                                placeholder="Year"
+                                inputMode="numeric"
+                                className="min-w-0 border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                              />
+                            </div>
+                          </div>
+                        ))}
+                        <button
+                          onClick={() => setColours(item.id, [...list, { name: '', code: '', make: '', model: '', year: '' }])}
+                          className="text-xs font-medium text-[#004475] hover:underline mt-1"
+                        >
+                          + Add another colour
+                        </button>
+                      </div>
+                    );
+                  })()}
 
                 </div>
               ))}
@@ -212,6 +311,7 @@ export default function BasketPage() {
           </div>
         )}
       </div>
+      <Footer />
     </div>
   );
 }

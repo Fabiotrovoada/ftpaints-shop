@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
 
   const { lines, note } = await req.json();
   const uid = session.user.uid;
-  const password = session.user.password;
+  const password = '';
 
   try {
     const user = await getPartnerByUid(uid, password);

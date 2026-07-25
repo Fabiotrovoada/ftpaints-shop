@@ -20,7 +20,7 @@ export async function GET(
   const withPartnerPricing = async (product: Record<string, unknown> | null | undefined) => {
     if (!product) return product ?? null;
     const copy = { ...product };
-    await applyPricelistToProducts(session.user.uid, session.user.password, [copy]);
+    await applyPricelistToProducts(session.user.uid, '', [copy]);
     return copy;
   };
 
@@ -29,7 +29,7 @@ export async function GET(
   if (cached) return NextResponse.json({ product: await withPartnerPricing(cached) });
 
   try {
-    const product = await getProductById(session.user.uid, session.user.password, id);
+    const product = await getProductById(session.user.uid, '', id);
     if (product) cacheSet(cacheKey, product, TTL.PRODUCT);
     return NextResponse.json({ product: await withPartnerPricing(product as Record<string, unknown> | null) });
   } catch (err) {

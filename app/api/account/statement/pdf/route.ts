@@ -8,10 +8,10 @@ export async function GET() {
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    const user = await getPartnerByUid(session.user.uid, session.user.password);
+    const user = await getPartnerByUid(session.user.uid, '');
     const partnerId = (user?.partner_id as [number, string])?.[0];
-    const partner = await getPartnerInfo(session.user.uid, session.user.password, partnerId);
-    const invoices = await getInvoices(session.user.uid, session.user.password, partnerId);
+    const partner = await getPartnerInfo(session.user.uid, '', partnerId);
+    const invoices = await getInvoices(session.user.uid, '', partnerId);
 
     const partnerName = (partner?.name as string) || session.user.email || 'Customer';
     const now = new Date();

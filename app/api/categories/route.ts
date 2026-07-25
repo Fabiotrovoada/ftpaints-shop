@@ -13,7 +13,7 @@ export async function GET() {
   if (cached) return NextResponse.json(cached);
 
   try {
-    const cats = await getCategories(session.user.uid, session.user.password);
+    const cats = await getCategories(session.user.uid, '');
     const result = { categories: cats || [] };
     cacheSet(cacheKey, result, TTL.CATEGORIES);
     return NextResponse.json(result);

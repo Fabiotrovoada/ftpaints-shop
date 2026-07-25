@@ -79,7 +79,7 @@ export default function Navbar() {
             <CreditBadge />
             {/* User */}
             <span className="hidden md:block text-sm text-gray-300 truncate max-w-[160px]">
-              {session?.user?.email}
+              {session?.user?.name || session?.user?.email}
             </span>
 
             <button

@@ -40,7 +40,7 @@ export async function GET(req: NextRequest) {
   // (copy protects the shared cached objects from mutation).
   const withPartnerPricing = async (result: { products: unknown[]; total: number }) => {
     const products = (result.products as Record<string, unknown>[]).map(p => ({ ...p }));
-    await applyPricelistToProducts(session.user.uid, session.user.password, products);
+    await applyPricelistToProducts(session.user.uid, '', products);
     return { products, total: result.total };
   };
 
@@ -72,7 +72,7 @@ export async function GET(req: NextRequest) {
       result = await getProductsByTag(tagId, { search, inStockOnly, offset, limit, sort });
     } else {
       // Use Mobile API for normal products
-      result = await getProducts(session.user.uid, session.user.password, { search, inStockOnly, offset, limit, categoryId, sort });
+      result = await getProducts(session.user.uid, '', { search, inStockOnly, offset, limit, categoryId, sort });
     }
 
     cacheSet(cacheKey, result, TTL.PRODUCTS);

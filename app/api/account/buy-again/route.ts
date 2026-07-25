@@ -13,11 +13,11 @@ export async function GET() {
   if (DEMO_MODE) return NextResponse.json({ products: DEMO_PRODUCTS });
 
   try {
-    const user = await getPartnerByUid(session.user.uid, session.user.password);
+    const user = await getPartnerByUid(session.user.uid, '');
     const partnerId = (user?.partner_id as [number, string])?.[0];
-    const { products } = await getPreviouslyPurchasedProducts(session.user.uid, session.user.password, partnerId);
+    const { products } = await getPreviouslyPurchasedProducts(session.user.uid, '', partnerId);
     // Overlay the partner's pricelist so re-order cards show the same price as the shop
-    await applyPricelistToProducts(session.user.uid, session.user.password, products);
+    await applyPricelistToProducts(session.user.uid, '', products);
     return NextResponse.json({ products });
   } catch {
     return NextResponse.json({ products: [] });

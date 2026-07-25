@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
-import { SessionProvider, PayPalProvider } from './providers';
+import { SessionProvider } from './providers';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -19,7 +19,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en">
       <body className={inter.className}>
-        <SessionProvider><PayPalProvider>{children}</PayPalProvider></SessionProvider>
+        <SessionProvider>{children}</SessionProvider>
       </body>
     </html>
   );

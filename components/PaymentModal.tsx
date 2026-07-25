@@ -1,6 +1,5 @@
 'use client';
 import { useState } from 'react';
-import { PayPalButtons } from '@paypal/react-paypal-js';
 
 interface Invoice {
   id: number;
@@ -20,13 +19,12 @@ interface Props {
 }
 
 export default function PaymentModal({ invoices, totalOutstanding, customerEmail, onClose }: Props) {
-  const [mode, setMode] = useState<'select' | 'stripe' | 'bank' | 'paypal'>('select');
+  const [mode, setMode] = useState<'select' | 'stripe' | 'bank'>('select');
   const [selectedIds, setSelectedIds] = useState<number[]>(
     invoices.filter(i => i.amount_residual > 0).map(i => i.id)
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [paypalOrderId, setPaypalOrderId] = useState('');
 
   const unpaidInvoices = invoices.filter(i => i.amount_residual > 0);
   const selectedTotal = unpaidInvoices
@@ -70,51 +68,6 @@ export default function PaymentModal({ invoices, totalOutstanding, customerEmail
     } finally {
       setLoading(false);
     }
-  }
-
-  async function createPayPalOrder() {
-    const res = await fetch('/api/payment/paypal/create-order', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        amount: selectedTotal,
-        invoiceIds: selectedNames,
-        description: `FTPaints Invoice Payment — ${selectedNames.join(', ')}`,
-        customerEmail,
-      }),
-    });
-    const data = await res.json();
-    if (data.orderId) return data.orderId;
-    throw new Error(data.error || 'PayPal order failed');
-  }
-
-  async function onPayPalApprove(data: { orderID: string }) {
-    try {
-      const res = await fetch('/api/payment/paypal/capture-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId: data.orderID,
-          invoiceIds: selectedNames,
-        }),
-      });
-      const result = await res.json();
-      if (result.success) {
-        window.location.href = `${window.location.origin}/account?payment=success&orderId=${data.orderID}`;
-      } else {
-        setError(result.error || 'Payment capture failed');
-        setMode('select');
-      }
-    } catch {
-      setError('Payment capture failed. Please contact us.');
-      setMode('select');
-    }
-  }
-
-  function onPayPalError(err: unknown) {
-    console.error('PayPal error:', err);
-    setError('PayPal payment failed. Please try again or use another method.');
-    setMode('select');
   }
 
   const bankName = process.env.NEXT_PUBLIC_BANK_NAME || 'Tide';
@@ -215,20 +168,6 @@ export default function PaymentModal({ invoices, totalOutstanding, customerEmail
                 <span className="ml-auto text-[#ff8f00] font-bold">£{selectedTotal.toFixed(2)}</span>
               </button>
 
-              {/* PayPal */}
-              <button
-                onClick={() => { setError(''); setMode('paypal'); }}
-                disabled={selectedIds.length === 0}
-                className="w-full bg-[#FFC439] hover:bg-[#e5b033] text-[#003087] rounded-xl p-4 flex items-center gap-4 transition-colors disabled:opacity-50"
-              >
-                <div className="text-2xl">🇿🇦</div>
-                <div className="text-left">
-                  <p className="font-semibold">Pay with PayPal</p>
-                  <p className="text-xs text-[#003087]/70">Fast, secure checkout with PayPal</p>
-                </div>
-                <span className="ml-auto font-bold">£{selectedTotal.toFixed(2)}</span>
-              </button>
-
               {/* Bank Transfer */}
               <button
                 onClick={() => setMode('bank')}
@@ -242,45 +181,6 @@ export default function PaymentModal({ invoices, totalOutstanding, customerEmail
                 </div>
                 <span className="ml-auto text-[#004475] font-bold">£{selectedTotal.toFixed(2)}</span>
               </button>
-            </div>
-          )}
-
-          {/* PayPal button */}
-          {mode === 'paypal' && (
-            <div className="space-y-3">
-              <button onClick={() => setMode('select')} className="text-sm text-gray-500 hover:text-gray-700">← Back</button>
-              <div className="bg-[#f0f7f4] border border-[#004475]/20 rounded-xl p-5 space-y-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-xl">🇿🇦</span>
-                  <p className="font-bold text-[#003087]">Pay with PayPal</p>
-                </div>
-                <p className="text-sm text-gray-600">
-                  Click the button below to pay <strong>£{selectedTotal.toFixed(2)}</strong> for invoice(s): <strong>{selectedNames.join(', ')}</strong>
-                </p>
-                <div className="bg-white rounded-lg p-1">
-                  <PayPalButtons
-                    style={{ layout: 'vertical', color: 'gold', shape: 'rect', label: 'pay' }}
-                    createOrder={async () => {
-                      try {
-                        const orderId = await createPayPalOrder();
-                        return orderId;
-                      } catch (e) {
-                        const msg = e instanceof Error ? e.message : 'Order creation failed';
-                        setError(msg);
-                        setMode('select');
-                        throw e;
-                      }
-                    }}
-                    onApprove={onPayPalApprove}
-                    onError={onPayPalError}
-                    onCancel={() => setMode('paypal')}
-                    disabled={loading}
-                  />
-                </div>
-                <p className="text-xs text-center text-gray-400">
-                  You'll be redirected to PayPal to complete payment securely.
-                </p>
-              </div>
             </div>
           )}
 

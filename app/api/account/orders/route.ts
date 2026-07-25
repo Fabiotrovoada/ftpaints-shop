@@ -13,9 +13,9 @@ export async function GET() {
   if (DEMO_MODE) return NextResponse.json({ orders: DEMO_ORDERS });
 
   try {
-    const user = await getPartnerByUid(session.user.uid, session.user.password);
+    const user = await getPartnerByUid(session.user.uid, '');
     const partnerId = (user?.partner_id as [number, string])?.[0];
-    const orders = await getSaleOrders(session.user.uid, session.user.password, partnerId);
+    const orders = await getSaleOrders(session.user.uid, '', partnerId);
     return NextResponse.json({ orders });
   } catch {
     return NextResponse.json({ orders: [] });

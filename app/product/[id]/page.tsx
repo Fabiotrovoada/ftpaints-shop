@@ -47,7 +47,7 @@ interface Product {
   variant_count?: number;
   type?: string;
   barcode?: string;
-  quantity_breaks?: Array<{ qty: number; price: number }>;
+  // quantity_breaks?: Array<{ qty: number; price: number }>;
   offer?: string;
   shipping?: string;
   rating?: number;

@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 import { useBasket } from '@/lib/basketStore';
 
 interface ReplenishItem {
@@ -295,6 +296,7 @@ export default function ReplenishmentPage() {
           </div>
         </div>
       </div>
+      <Footer />
     </div>
   );
 }

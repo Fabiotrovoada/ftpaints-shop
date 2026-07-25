@@ -13,9 +13,9 @@ export async function GET() {
   if (DEMO_MODE) return NextResponse.json(DEMO_CREDIT);
 
   try {
-    const user = await getPartnerByUid(session.user.uid, session.user.password);
+    const user = await getPartnerByUid(session.user.uid, '');
     const partnerId = (user?.partner_id as [number, string])?.[0];
-    const partner = await getPartnerInfo(session.user.uid, session.user.password, partnerId);
+    const partner = await getPartnerInfo(session.user.uid, '', partnerId);
 
     const creditLimit = (partner?.credit_limit as number) || 0;
     const creditUsed = (partner?.credit as number) || 0;

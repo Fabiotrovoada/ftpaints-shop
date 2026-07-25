@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useSession } from 'next-auth/react';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 import ProductCard from '@/components/ProductCard';
 import ImportOrder from '@/components/ImportOrder';
 import { useFavourites } from '@/lib/favourites';
@@ -515,6 +516,7 @@ export default function ShopPage() {
           </div>
         </div>
       </div>
+      <Footer />
     </div>
   );
 }

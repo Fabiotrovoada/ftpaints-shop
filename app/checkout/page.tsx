@@ -3,7 +3,16 @@ import { useState, useEffect } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Navbar from '@/components/Navbar';
-import { useBasket } from '@/lib/basketStore';
+import Footer from '@/components/Footer';
+import { useBasket, type BasketItem } from '@/lib/basketStore';
+
+// Resolve the per-unit colour list for a line, falling back to the legacy
+// single-colour fields for baskets persisted before the per-unit change.
+function colourList(item: BasketItem): Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }> {
+  if (item.colours?.length) return item.colours;
+  if (item.colourName || item.colourCode) return [{ name: item.colourName, code: item.colourCode }];
+  return [];
+}
 
 const BANK_DETAILS: [string, string][] = [
   ['Account Name', 'FT Paints Ltd'],
@@ -177,7 +186,7 @@ export default function CheckoutPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colourName: i.colourName, colourCode: i.colourCode })),
+          lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colours: i.colours, colourName: i.colourName, colourCode: i.colourCode })),
           note: [
             note,
             deliveryMethod !== 'collection' ? `Delivery: ${selectedMethod.name}` : `Click & Collect [C&C Agreement signed by ${session?.user?.email} on ${new Date().toLocaleDateString('en-GB')}]`,
@@ -783,9 +792,17 @@ export default function CheckoutPage() {
                       <span className="text-gray-600 truncate flex-1 mr-2">{item.name.substring(0,35)} ×{item.qty}</span>
                       <span className="font-medium text-gray-900 flex-shrink-0">£{(item.price * item.qty).toFixed(2)}</span>
                     </div>
-                    {(item.colourName || item.colourCode) && (
-                      <p className="text-xs text-[#004475]">🎨 {[item.colourName, item.colourCode].filter(Boolean).join(' · ')}</p>
-                    )}
+                    {colourList(item).map((c, ci) => (
+                      <div key={ci} className="text-xs text-[#004475]">
+                        <p>
+                          🎨 {colourList(item).length > 1 && <span className="font-semibold">{ci + 1}. </span>}
+                          {[c.name, c.code].filter(Boolean).join(' · ').toUpperCase()}
+                        </p>
+                        {[c.make, c.model, c.year].some(Boolean) && (
+                          <p className="text-gray-500 pl-4">🚗 {[c.make, c.model, c.year].filter(Boolean).join(' ')}</p>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 ))}
               </div>
@@ -814,6 +831,7 @@ export default function CheckoutPage() {
           </div>
         </div>
       </div>
+      <Footer />
     </div>
   );
 }

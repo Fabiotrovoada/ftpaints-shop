@@ -8,8 +8,6 @@
     "start": "next start"
   },
   "dependencies": {
-    "@paypal/paypal-js": "^9.5.0",
-    "@paypal/react-paypal-js": "^9.1.0",
     "@stripe/stripe-js": "^9.0.0",
     "@types/papaparse": "^5.5.2",
     "lucide-react": "^1.7.0",

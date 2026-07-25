@@ -13,9 +13,9 @@ export async function GET() {
   if (DEMO_MODE) return NextResponse.json({ invoices: DEMO_INVOICES });
 
   try {
-    const user = await getPartnerByUid(session.user.uid, session.user.password);
+    const user = await getPartnerByUid(session.user.uid, '');
     const partnerId = (user?.partner_id as [number, string])?.[0];
-    const invoices = await getInvoices(session.user.uid, session.user.password, partnerId);
+    const invoices = await getInvoices(session.user.uid, '', partnerId);
     return NextResponse.json({ invoices });
   } catch {
     return NextResponse.json({ invoices: [] });

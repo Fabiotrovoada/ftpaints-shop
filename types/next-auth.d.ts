@@ -8,19 +8,16 @@ declare module 'next-auth' {
       name?: string | null;
       image?: string | null;
       uid: number;
-      password: string;
     };
   }
 
   interface User {
     uid: number;
-    password: string;
   }
 }
 
 declare module 'next-auth/jwt' {
   interface JWT {
     uid: number;
-    password: string;
   }
 }

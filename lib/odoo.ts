@@ -695,21 +695,33 @@ export async function getPreviouslyPurchasedProducts(
 
 export async function createSaleOrder(
   _uid: number, _password: string, partnerId: number,
-  lines: Array<{ productId: number; qty: number; price: number; name?: string; colourName?: string; colourCode?: string }>,
+  lines: Array<{ productId: number; qty: number; price: number; name?: string; colours?: Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }>; colourName?: string; colourCode?: string }>,
   note?: string
 ): Promise<{ id: number; name: string }> {
+  // Render one colour spec ("Colour: X, Colour code: Y, Vehicle: MAKE MODEL YEAR")
+  // from a customer-entered colour/vehicle pair.
+  const colourSpec = (c: { name?: string; code?: string; make?: string; model?: string; year?: string }) => [
+    c.name ? `Colour: ${c.name.toUpperCase()}` : '',
+    c.code ? `Colour code: ${c.code.toUpperCase()}` : '',
+    [c.make, c.model, c.year].some(Boolean) ? `Vehicle: ${[c.make, c.model, c.year].filter(Boolean).join(' ')}` : '',
+  ].filter(Boolean).join(', ');
   const orderLines = lines.map((l) => {
     const line: Record<string, unknown> = {
       product_id: l.productId, product_uom_qty: l.qty, price_unit: l.price,
     };
     // For bespoke custom-mixed paints, fold the customer's colour spec into the
-    // line description so it prints on the quotation the team mixes from.
-    const colourParts = [
-      l.colourName ? `Colour: ${l.colourName}` : '',
-      l.colourCode ? `Colour code: ${l.colourCode}` : '',
-    ].filter(Boolean);
-    if (colourParts.length) {
-      line.name = l.name ? `${l.name} — ${colourParts.join(', ')}` : colourParts.join(', ');
+    // line description so it prints on the quotation the team mixes from. Newer
+    // baskets carry one colour per unit (`colours`); enumerate them under the
+    // product name. Older baskets carry a single `colourName`/`colourCode` pair.
+    if (l.colours?.length) {
+      const rows = l.colours
+        .map(c => colourSpec(c))
+        .filter(Boolean)
+        .map((spec, i) => `  ${i + 1}) ${spec}`);
+      line.name = [l.name, ...rows].filter(Boolean).join('\n');
+    } else {
+      const spec = colourSpec({ name: l.colourName, code: l.colourCode });
+      if (spec) line.name = l.name ? `${l.name} — ${spec}` : spec;
     }
     return [0, 0, line];
   });

@@ -4,7 +4,7 @@ import { authOptions } from '@/lib/auth';
 import { getWebSession } from '@/lib/odoo';
 
 export async function GET(
-  _req: NextRequest,
+  req: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
   const session = await getServerSession(authOptions);
@@ -13,6 +13,25 @@ export async function GET(
   const { id } = await context.params;
   const orderId = parseInt(id);
   if (isNaN(orderId)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+
+  // Opened as a browser tab (top-level navigation): return a tiny HTML shell whose
+  // <title> controls the tab title, embedding the PDF full-screen. Chrome ignores the
+  // Content-Disposition filename for an inline PDF's tab title, so this is the only
+  // reliable lever. The iframe requests ?raw=1 below to get the actual PDF bytes.
+  const wantsHtml = (req.headers.get('accept') || '').includes('text/html')
+    && req.nextUrl.searchParams.get('raw') !== '1';
+  if (wantsHtml) {
+    const title = `FTPaints Order ${orderId}`;
+    const html = `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>`
+      + `<meta name="viewport" content="width=device-width, initial-scale=1"/>`
+      + `<title>${title}</title>`
+      + `<style>html,body{margin:0;height:100%}iframe{border:0;width:100%;height:100%;display:block}</style>`
+      + `</head><body><iframe src="/api/account/orders/${orderId}/pdf?raw=1" title="${title}"></iframe></body></html>`;
+    return new NextResponse(html, {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    });
+  }
 
   try {
     const cookies = await getWebSession();
@@ -25,7 +44,7 @@ export async function GET(
     return new NextResponse(buffer, {
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `inline; filename="order-${orderId}.pdf"`,
+        'Content-Disposition': `inline; filename="FTPaints-Order-${orderId}.pdf"`,
       },
     });
   } catch {

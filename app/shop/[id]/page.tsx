@@ -3,6 +3,7 @@ import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useSession } from 'next-auth/react';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 import { useBasket } from '@/lib/basketStore';
 import { useFavourites } from '@/lib/favourites';
 
@@ -54,8 +55,8 @@ export default function ProductDetailPage() {
   const [added, setAdded] = useState(false);
   const [activeTab, setActiveTab] = useState<'details' | 'specs'>('details');
   const [selectedVariant, setSelectedVariant] = useState<VariantOption | null>(null);
-  const [colourName, setColourName] = useState('');
-  const [colourCode, setColourCode] = useState('');
+  // One colour spec per unit of quantity for FT Custom Mixed Paints.
+  const [colourSpecs, setColourSpecs] = useState<{ name: string; code: string; make: string; model: string; year: string }[]>([{ name: '', code: '', make: '', model: '', year: '' }]);
 
   // Variants: group by attribute name
   const variants = product?.variant_ids || [];
@@ -69,9 +70,10 @@ export default function ProductDetailPage() {
   // colour spec captured onto the order.
   const categoryName = Array.isArray(product?.categ_id) ? product.categ_id[1] : '';
   const isCustomMixed = categoryName.includes('FT Custom Mixed Paints');
-  const hideBreaks = isCustomMixed;
-  // Require at least one of the two colour fields before adding a custom paint.
-  const colourMissing = isCustomMixed && !colourName.trim() && !colourCode.trim();
+  // Quantity breaks disabled for now — hide the UI and skip break pricing.
+  const hideBreaks = true; // was: isCustomMixed
+  // Every unit needs at least one of its two colour fields before adding a custom paint.
+  const colourMissing = isCustomMixed && colourSpecs.some(s => !s.name.trim() && !s.code.trim());
   const breaks = (product && !hideBreaks) ? (
     (product.quantity_breaks && product.quantity_breaks.length > 0)
       ? product.quantity_breaks
@@ -92,6 +94,16 @@ export default function ProductDetailPage() {
     }
   }, [product]);
 
+  // Keep one colour row per unit for custom-mixed paints, preserving typed values.
+  useEffect(() => {
+    if (!isCustomMixed) return;
+    setColourSpecs(prev => {
+      if (prev.length === qty) return prev;
+      if (qty < prev.length) return prev.slice(0, qty);
+      return [...prev, ...Array.from({ length: qty - prev.length }, () => ({ name: '', code: '', make: '', model: '', year: '' }))];
+    });
+  }, [qty, isCustomMixed]);
+
   useEffect(() => {
     if (!session || !id) return;
     fetch(`/api/products/${id}`)
@@ -111,9 +123,22 @@ export default function ProductDetailPage() {
       price: currentPrice,
       qty,
       image: product.image_url || product.image_128,
-      colourName: isCustomMixed ? colourName.trim() || undefined : undefined,
-      colourCode: isCustomMixed ? colourCode.trim() || undefined : undefined,
+      colours: isCustomMixed
+        ? colourSpecs.map(s => ({
+            name: s.name.trim() || undefined,
+            code: s.code.trim() || undefined,
+            make: s.make.trim() || undefined,
+            model: s.model.trim() || undefined,
+            year: s.year.trim() || undefined,
+          }))
+        : undefined,
     });
+    // For custom-mixed paints, clear the colour spec + qty after adding so the
+    // customer can pick another size and enter its colour on a fresh slate.
+    if (isCustomMixed) {
+      setColourSpecs([{ name: '', code: '', make: '', model: '', year: '' }]);
+      setQty(1);
+    }
     setAdded(true);
     setTimeout(() => setAdded(false), 2000);
   }
@@ -272,33 +297,80 @@ export default function ProductDetailPage() {
               )}
             </div>
 
-            {/* Custom colour spec (FT Custom Mixed Paints only) */}
+            {/* Custom colour spec (FT Custom Mixed Paints only) — one row per unit */}
             {isCustomMixed && (
               <div className="bg-white rounded-xl border border-gray-200 p-4">
                 <p className="text-sm font-semibold text-gray-700">🎨 Custom Colour Details</p>
-                <p className="text-xs text-gray-500 mt-0.5 mb-3">Tell us the colour to mix — enter a name, a code, or both.</p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Colour name</label>
-                    <input
-                      value={colourName}
-                      onChange={e => setColourName(e.target.value)}
-                      placeholder="e.g. Gentian Blue"
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-500 mb-1">Colour code</label>
-                    <input
-                      value={colourCode}
-                      onChange={e => setColourCode(e.target.value)}
-                      placeholder="e.g. RAL 5010"
-                      className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
-                    />
-                  </div>
+                <p className="text-xs text-gray-500 mt-0.5 mb-3">
+                  {qty > 1
+                    ? `Tell us the colour to mix for each of your ${qty} units — enter a name, a code, or both.`
+                    : 'Tell us the colour to mix — enter a name, a code, or both.'}
+                </p>
+                <div className="space-y-3">
+                  {colourSpecs.map((spec, i) => (
+                    <div key={i}>
+                      {qty > 1 && (
+                        <p className="text-xs font-semibold text-[#004475] mb-1">Colour {i + 1} of {qty}</p>
+                      )}
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Colour name</label>
+                          <input
+                            value={spec.name}
+                            onChange={e => setColourSpecs(prev => prev.map((s, j) => j === i ? { ...s, name: e.target.value.toUpperCase() } : s))}
+                            placeholder="e.g. Gentian Blue"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Colour code</label>
+                          <input
+                            value={spec.code}
+                            onChange={e => setColourSpecs(prev => prev.map((s, j) => j === i ? { ...s, code: e.target.value.toUpperCase() } : s))}
+                            placeholder="e.g. RAL 5010"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                          />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 mt-3">
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Make</label>
+                          <input
+                            value={spec.make}
+                            onChange={e => setColourSpecs(prev => prev.map((s, j) => j === i ? { ...s, make: e.target.value } : s))}
+                            placeholder="e.g. Ford"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-500 mb-1">Model</label>
+                          <input
+                            value={spec.model}
+                            onChange={e => setColourSpecs(prev => prev.map((s, j) => j === i ? { ...s, model: e.target.value } : s))}
+                            placeholder="e.g. Focus"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                          />
+                        </div>
+                        <div className="col-span-2 sm:col-span-1">
+                          <label className="block text-xs text-gray-500 mb-1">Year</label>
+                          <input
+                            value={spec.year}
+                            onChange={e => setColourSpecs(prev => prev.map((s, j) => j === i ? { ...s, year: e.target.value } : s))}
+                            placeholder="e.g. 2018"
+                            inputMode="numeric"
+                            className="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
                 {colourMissing && (
-                  <p className="text-xs text-amber-600 mt-2">Enter a colour name or code to add this custom paint to your basket.</p>
+                  <p className="text-xs text-amber-600 mt-2">
+                    {qty > 1
+                      ? 'Enter a colour name or code for every unit to add this custom paint to your basket.'
+                      : 'Enter a colour name or code to add this custom paint to your basket.'}
+                  </p>
                 )}
               </div>
             )}
@@ -320,6 +392,30 @@ export default function ProductDetailPage() {
                 {isFav ? '❤️' : '♡'}
               </button>
             </div>
+
+            {/* Multi-size cue: a persistent banner that each size is added on its own.
+                Upgrades to a bold "Added" state after a successful add. */}
+            {isCustomMixed && hasVariants && (
+              <div
+                className={`flex items-start gap-3 rounded-xl border-2 px-4 py-3 transition-colors ${
+                  added
+                    ? 'border-green-500 bg-green-50 text-green-800'
+                    : 'border-amber-300 bg-amber-50 text-amber-800'
+                }`}
+              >
+                <span className="text-xl leading-none flex-shrink-0">{added ? '✓' : '🎨'}</span>
+                <div>
+                  <p className="text-sm font-bold">
+                    {added ? 'Added to basket!' : 'Ordering more than one size?'}
+                  </p>
+                  <p className="text-sm">
+                    {added
+                      ? 'Pick another size, enter its colour, and add it as a separate item.'
+                      : 'Add each size separately — pick a size, enter its colour name/code, then Add to Basket. The fields reset so you can add the next size.'}
+                  </p>
+                </div>
+              </div>
+            )}
 
             {/* Description */}
             {(product.description_sale || product.description) && (
@@ -383,6 +479,7 @@ export default function ProductDetailPage() {
           <button onClick={() => router.push('/shop')} className="btn-outline text-sm">← Back to Shop</button>
         </div>
       </div>
+      <Footer />
     </div>
   );
 }

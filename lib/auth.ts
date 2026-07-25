@@ -1,6 +1,6 @@
 import { NextAuthOptions, User } from 'next-auth';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import { authenticate } from './odoo';
+import { authenticate, getPartnerByUid } from './odoo';
 
 export const authOptions: NextAuthOptions = {
   secret: process.env.NEXTAUTH_SECRET,
@@ -16,12 +16,21 @@ export const authOptions: NextAuthOptions = {
         try {
           const auth = await authenticate(credentials.email, credentials.password);
           if (!auth) return null;
+          // Odoo login only returns ids, so fetch the partner's real name for display.
+          // Fall back through res.users name → partner display name → email.
+          let displayName = credentials.email;
+          try {
+            const u = await getPartnerByUid(auth.user_id, credentials.password);
+            const partner = u?.partner_id as [number, string] | undefined;
+            displayName = (u?.name as string) || (Array.isArray(partner) ? partner[1] : '') || credentials.email;
+          } catch {
+            // Non-fatal — keep the email as the display name if the lookup fails.
+          }
           return {
             id: String(auth.user_id),
             email: credentials.email,
-            name: credentials.email,
+            name: displayName,
             uid: auth.user_id,
-            password: credentials.password,
           };
         } catch (err) {
           console.error('Auth error:', err instanceof Error ? err.message : err);
@@ -35,8 +44,8 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         const u = user as User;
         token.uid = u.uid;
-        token.password = u.password;
         token.email = u.email;
+        token.name = u.name;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         // pricelist loaded lazily on checkout, not at login
       }
@@ -45,8 +54,8 @@ export const authOptions: NextAuthOptions = {
     async session({ session, token }) {
       session.user = {
         ...session.user,
+        name: token.name,
         uid: token.uid,
-        password: token.password,
         // pricelist is fetched lazily on checkout page
       };
       return session;

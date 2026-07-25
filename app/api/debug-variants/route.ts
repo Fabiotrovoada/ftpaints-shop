@@ -11,7 +11,7 @@ export async function GET(req: NextRequest) {
   const id = parseInt(searchParams.get('id') || '0');
 
   try {
-    const product = await getProductById(session.user.uid, session.user.password, id);
+    const product = await getProductById(session.user.uid, '', id);
     if (!product) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
     return NextResponse.json({

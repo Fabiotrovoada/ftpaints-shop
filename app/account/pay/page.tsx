@@ -3,6 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 
 export const dynamic = 'force-dynamic';
 
@@ -294,6 +295,7 @@ function PayPageInner() {
           </div>
         )}
       </div>
+      <Footer />
     </div>
   );
 }

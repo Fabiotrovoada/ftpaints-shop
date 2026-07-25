@@ -3,6 +3,7 @@ import { useState, useEffect, Suspense } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Navbar from '@/components/Navbar';
+import Footer from '@/components/Footer';
 
 interface Order {
   id: number;
@@ -302,7 +303,7 @@ function AccountPageInner() {
           </div>
         )}
       </div>
-
+      <Footer />
     </div>
   );
 }
