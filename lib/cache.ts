@@ -37,5 +37,6 @@ export const TTL = {
   CATEGORIES: 3600,   // 1 hour — categories/brands rarely change
   ORDERS: 60,         // 1 min — orders
   INVOICES: 120,      // 2 min — invoices
+  BUY_AGAIN: 300,     // 5 min — purchase history (several Odoo round-trips)
   SESSION: 30,        // 30 sec — session/auth
 };

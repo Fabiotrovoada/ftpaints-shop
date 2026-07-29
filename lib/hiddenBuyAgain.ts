@@ -9,6 +9,7 @@ interface HiddenBuyAgainStore {
   ids: Set<number>;
   hide: (id: number) => void;
   unhide: (id: number) => void;
+  unhideAll: () => void;
   isHidden: (id: number) => boolean;
 }
 
@@ -26,6 +27,9 @@ export const useHiddenBuyAgain = create<HiddenBuyAgainStore>()(
         ids.delete(id);
         return { ids };
       }),
+      // One atomic reset — restoring by looping unhide() would re-copy the Set
+      // on every id and race with the list being iterated.
+      unhideAll: () => set({ ids: new Set<number>() }),
       isHidden: (id) => get().ids.has(id),
     }),
     {

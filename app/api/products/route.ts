@@ -79,7 +79,10 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(await withPartnerPricing(result));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('Products API error:', message);
+    // Last resort: getProducts already falls back to JSON-RPC when the Mobile API
+    // raises, so reaching here means both sources failed. Log the filters with it —
+    // this class of fault is category-specific and unfindable without them.
+    console.error(`Products API error (categoryId=${categoryId ?? '-'} tagId=${tagId ?? '-'} search="${search}" offset=${offset}):`, message);
     return NextResponse.json({ error: 'Failed to fetch products', detail: message, products: [], total: 0 }, { status: 500 });
   }
 }

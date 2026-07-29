@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { useSession } from 'next-auth/react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
@@ -177,10 +178,21 @@ export default function ProductDetailPage() {
 
         {/* Breadcrumb */}
         <nav className="text-sm text-gray-500 mb-4 flex items-center gap-2">
-          <button onClick={() => router.push('/shop')} className="hover:text-[#004475]">Shop</button>
+          <Link href="/shop" className="hover:text-[#004475]">Shop</Link>
           <span>/</span>
-          {product.categ_id && <span className="hover:text-[#004475]">{(product.categ_id as [number,string])[1]}</span>}
-          <span>/</span>
+          {product.categ_id && (
+            <>
+              {/* Back to the shop with this category already applied, so "more
+                  like this one" is one click rather than a hunt through the tree. */}
+              <Link
+                href={`/shop?categoryId=${(product.categ_id as [number,string])[0]}`}
+                className="hover:text-[#004475] hover:underline truncate"
+              >
+                {(product.categ_id as [number,string])[1]}
+              </Link>
+              <span>/</span>
+            </>
+          )}
           <span className="text-gray-900 font-medium truncate">{product.name.substring(0, 40)}</span>
         </nav>
 

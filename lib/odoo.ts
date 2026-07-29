@@ -43,6 +43,19 @@ function httpsGetWithBody(urlStr: string, body: string): Promise<string> {
   });
 }
 
+/**
+ * The Mobile API reports failures inside an HTTP 200 as `{success: false, success_msg}`
+ * rather than a JSON-RPC error envelope. Callers used to read straight past that and
+ * see an empty product list, which is indistinguishable from a genuinely empty
+ * category — so a server-side crash looked like "No products found" forever.
+ */
+export class OdooMobileError extends Error {
+  constructor(readonly endpoint: string, message: string) {
+    super(message);
+    this.name = 'OdooMobileError';
+  }
+}
+
 async function mobileGet(
   endpoint: string,
   authPayload: Record<string, unknown>,
@@ -53,7 +66,12 @@ async function mobileGet(
   const responseText = await httpsGetWithBody(url, body);
   const data = JSON.parse(responseText) as { jsonrpc?: string; result?: unknown; error?: { message: string } };
   if (data.error) throw new Error((data.error as { message: string }).message);
-  return data.result !== undefined ? data.result : data;
+  const result = data.result !== undefined ? data.result : data;
+  if (result && typeof result === 'object' && (result as { success?: boolean }).success === false) {
+    const msg = (result as { success_msg?: string }).success_msg;
+    throw new OdooMobileError(endpoint, msg ? String(msg) : 'Mobile API returned success:false');
+  }
+  return result;
 }
 
 async function mobilePost(
@@ -213,7 +231,15 @@ interface MobileProduct {
   description_sale?: string;
   description_ecommerce?: string;
   bulk_deal_values?: Array<{ qty: number; price: number }>;
-  variant_ids?: Array<{ id: number; name: string; price?: number }>;
+  variant_ids?: Array<{
+    id: number;
+    name: string;
+    price?: number;
+    merged_name?: string;
+    internal_reference?: string;
+    barcode?: string;
+    attribute_values?: Array<{ name: string; display_name: string; attribute_id: number }>;
+  }>;
   type?: string;
   barcode?: string;
   offer?: string;
@@ -267,7 +293,142 @@ function normalizeMobileProduct(p: MobileProduct) {
   };
 }
 
+// The product.template fields every ProductCard needs, and the single mapping
+// from a raw JSON-RPC row to that card shape. Used by every search_read that
+// feeds a product grid (tag/category browse, favourites, Buy Again) so the
+// shape can never drift between them.
+export const TEMPLATE_CARD_FIELDS = [
+  'id', 'name', 'default_code', 'list_price', 'standard_price',
+  'qty_available', 'virtual_available', 'categ_id', 'uom_id',
+  'image_128', 'product_tag_ids', 'type', 'barcode',
+];
+
+function toProductCard(p: MobileProduct): Record<string, unknown> {
+  return {
+    id: p.id,
+    name: p.name,
+    default_code: p.default_code || false,
+    list_price: p.list_price || 0,
+    standard_price: p.standard_price || 0,
+    qty_available: p.qty_available || 0,
+    virtual_available: p.virtual_available || 0,
+    categ_id: p.categ_id || false,
+    uom_id: p.uom_id || false,
+    image_128: null, // base64 is heavy — the frontend loads image_url instead
+    image_url: p.image_128 ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128` : null,
+    product_tag_ids: p.product_tag_ids || [],
+    type: p.type || 'consu',
+    barcode: p.barcode || '',
+  };
+}
+
 // ─── Products (Mobile API) ────────────────────────────────────────────────────
+
+/**
+ * Rebuild a product window over JSON-RPC when the Mobile API listing raises.
+ *
+ * The domain is a verified stand-in for the mobile listing rather than a guess:
+ * `public_categ_ids child_of <id>` reproduces the mobile itemCount exactly on
+ * every category checked (24375→94, 20786→2054, 22184→239, 24371→1005,
+ * 20784→9872, 24504→6260), and an empty domain gives the same 33,258 total.
+ * Notably there is no is_published / sale_ok / type filter in play.
+ */
+async function getProductsViaRpc(
+  admin: AdminToken,
+  options: { search?: string; categoryId?: number; inStockOnly?: boolean; offset?: number; limit?: number }
+): Promise<{ products: Record<string, unknown>[]; total: number }> {
+  const domain: unknown[] = [];
+  if (options.categoryId) domain.push(['public_categ_ids', 'child_of', options.categoryId]);
+  if (options.search) {
+    domain.push('|', '|',
+      ['name', 'ilike', options.search],
+      ['default_code', 'ilike', options.search],
+      ['barcode', 'ilike', options.search]);
+  }
+  if (options.inStockOnly) domain.push(['qty_available', '>', 0]);
+
+  const total = (await jsonrpcCallKw('product.template', 'search_count', [domain])) as number;
+  const rows = (await jsonrpcCallKw('product.template', 'search_read', [
+    domain,
+    TEMPLATE_CARD_FIELDS,
+  ], {
+    offset: options.offset || 0,
+    limit: options.limit || 25,
+    // Ascending id is close to the mobile listing's own order (its page 1 starts
+    // 1, 4008, 4009, 4032, 5641), so a customer paging through a category that
+    // fell back part-way doesn't see products repeat or disappear.
+    order: 'id asc',
+    context: {},
+  })) as MobileProduct[];
+
+  const products = rows.map(toProductCard);
+  await applyMobilePrices(admin, products);
+  return { products, total };
+}
+
+interface MobilePriceSnapshot {
+  ok: boolean;
+  price: number;
+  special: number;
+  breaks: Array<{ qty: number; price: number }>;
+}
+
+/**
+ * Put real Mobile-API prices back onto JSON-RPC-sourced cards.
+ *
+ * Necessary because the mobile price is not product.template.list_price (7698 is
+ * 33.5475 vs a 27.32 list) and can't be recomputed locally — the website
+ * pricelist holds several cost-plus rules with nothing to say which one a given
+ * product lands on. The per-product endpoint is the only source, and the listing
+ * endpoint has no id-based filter (`ids`, `product_ids` and friends are silently
+ * ignored and return the whole catalogue), so this fans out one call per card
+ * with bounded concurrency and caches each result.
+ *
+ * A card whose own detail call also raises keeps its JSON-RPC list_price, which
+ * may read low. That is only ever the products that caused the fallback.
+ */
+async function applyMobilePrices(admin: AdminToken, products: Record<string, unknown>[]): Promise<void> {
+  let cursor = 0;
+  const worker = async (): Promise<void> => {
+    while (cursor < products.length) {
+      const p = products[cursor++];
+      const id = typeof p.id === 'number' ? p.id : Number(p.id);
+      if (!id) continue;
+
+      const key = `mobile-price:${id}`;
+      let snap = cacheGet<MobilePriceSnapshot>(key);
+      if (!snap) {
+        try {
+          const result = (await mobileGet(`/api/v1/product_template/${id}`, admin)) as {
+            product_template?: MobileProduct;
+          } | null;
+          const t = result?.product_template;
+          snap = t
+            ? {
+                ok: true,
+                price: t.price || 0,
+                special: t.is_special_price && t.special_price ? t.special_price : 0,
+                breaks: t.bulk_deal_values || [],
+              }
+            : { ok: false, price: 0, special: 0, breaks: [] };
+        } catch {
+          // Cache the failure too — retrying it on every page render would turn a
+          // handful of broken products into a permanent latency tax.
+          snap = { ok: false, price: 0, special: 0, breaks: [] };
+        }
+        cacheSet(key, snap, TTL.PRODUCTS);
+      }
+
+      if (!snap.ok) continue;
+      // original_price is the pre-special base applyPricelistToProducts prices
+      // from; setting only list_price would re-base the partner's price wrongly.
+      p.original_price = snap.price;
+      p.list_price = snap.special || snap.price;
+      p.quantity_breaks = snap.breaks;
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, products.length) }, worker));
+}
 
 export async function getProducts(
   _uid: number,
@@ -310,22 +471,48 @@ export async function getProducts(
   // exactly the page(s) spanning our [offset, offset+limit) window and slice it
   // precisely — so the grid shows `limit` items per page and never skips products
   // at the page seams.
-  const page1 = await fetchMobilePage(1);
-  const total = page1.total;
-  const serverPageSize = page1.rows.length || limit;
+  async function fetchViaMobile(): Promise<{ products: Record<string, unknown>[]; total: number }> {
+    const page1 = await fetchMobilePage(1);
+    const serverPageSize = page1.rows.length || limit;
 
-  const startPage = Math.floor(offset / serverPageSize) + 1;
-  const endPage = Math.floor((offset + limit - 1) / serverPageSize) + 1;
+    const startPage = Math.floor(offset / serverPageSize) + 1;
+    const endPage = Math.floor((offset + limit - 1) / serverPageSize) + 1;
 
-  const collected: MobileProduct[] = [];
-  for (let pg = startPage; pg <= endPage; pg++) {
-    const rows = pg === 1 ? page1.rows : (await fetchMobilePage(pg)).rows;
-    collected.push(...rows);
-    if (rows.length < serverPageSize) break; // reached the final, short page
+    const collected: MobileProduct[] = [];
+    for (let pg = startPage; pg <= endPage; pg++) {
+      const rows = pg === 1 ? page1.rows : (await fetchMobilePage(pg)).rows;
+      collected.push(...rows);
+      if (rows.length < serverPageSize) break; // reached the final, short page
+    }
+
+    const windowStart = offset - (startPage - 1) * serverPageSize;
+    return {
+      products: collected.slice(windowStart, windowStart + limit).map(normalizeMobileProduct),
+      total: page1.total,
+    };
   }
 
-  const windowStart = offset - (startPage - 1) * serverPageSize;
-  let products = collected.slice(windowStart, windowStart + limit).map(normalizeMobileProduct);
+  // Odoo's mobile module raises on any response containing a product that belongs
+  // to more than one website category ("Expected singleton"), which takes out whole
+  // categories and scattered pages. Once a filter has been seen to fail, serve it
+  // from JSON-RPC for the rest of the TTL rather than retrying per page — that also
+  // keeps one ordering across every page of that filter.
+  const degradedKey = `mobile-degraded:${options.categoryId || ''}:${options.search || ''}:${options.inStockOnly ? 1 : 0}`;
+  let result: { products: Record<string, unknown>[]; total: number };
+  if (cacheGet<boolean>(degradedKey)) {
+    result = await getProductsViaRpc(admin, options);
+  } else {
+    try {
+      result = await fetchViaMobile();
+    } catch (err) {
+      if (!(err instanceof OdooMobileError)) throw err;
+      console.error(`[odoo] Mobile listing failed, falling back to JSON-RPC (${err.endpoint}): ${err.message}`);
+      cacheSet(degradedKey, true, TTL.PRODUCTS);
+      result = await getProductsViaRpc(admin, options);
+    }
+  }
+  const products = result.products;
+  const total = result.total;
 
   // Sort client-side since Mobile API doesn't support sorting
   if (options.sort) {
@@ -343,13 +530,113 @@ export async function getProducts(
   return { products, total };
 }
 
+/**
+ * Rebuild the Mobile API's product_template payload from JSON-RPC, so a product the
+ * mobile module refuses to serialise still has a working detail page.
+ *
+ * Two deliberate gaps, both because the mobile payload has no JSON-RPC equivalent:
+ *  - price is the raw list price, not the mobile cost-plus price (which can't be
+ *    recomputed locally — the website pricelist has several cost-plus rules with
+ *    nothing to say which one a product lands on);
+ *  - quantity breaks come back empty. Odoo's bulk.order rows are *not* what
+ *    bulk_deal_values reflects: template 20723 has three bulk.order rows and the
+ *    Mobile API still returns an empty bulk_deal_values, so guessing from them
+ *    would invent a bulk price that does not exist.
+ */
+async function buildProductViaRpc(id: number): Promise<MobileProduct | undefined> {
+  const row = (await jsonrpcCallKw('product.template', 'read', [[id]], {
+    fields: ['id', 'name', 'list_price', 'standard_price', 'default_code', 'barcode',
+             'description_sale', 'public_categ_ids', 'type', 'qty_available'],
+  })) as Record<string, unknown> | null;
+  if (!row || typeof row.id !== 'number') return undefined;
+
+  // The website category, not the internal categ_id: the detail page's breadcrumb
+  // links to /shop?categoryId=N, and the shop filters on public categories.
+  const publicCatIds = Array.isArray(row.public_categ_ids) ? row.public_categ_ids as number[] : [];
+  let category: { id: number; name: string } | undefined;
+  if (publicCatIds.length) {
+    try {
+      const cats = (await jsonrpcCallKw('product.public.category', 'read', [[publicCatIds[0]]], {
+        fields: ['id', 'name'],
+      })) as { id: number; name: string } | null;
+      if (cats) category = { id: cats.id, name: cats.name };
+    } catch { /* breadcrumb simply shows no category */ }
+  }
+
+  const variants = (await jsonrpcCallKw('product.product', 'search_read', [
+    [['product_tmpl_id', '=', id]],
+    ['id', 'name', 'default_code', 'barcode', 'lst_price', 'product_template_attribute_value_ids'],
+  ], { context: {} })) as Array<{
+    id: number; name: string; default_code?: string | false; barcode?: string | false;
+    lst_price?: number; product_template_attribute_value_ids?: number[];
+  }>;
+
+  // Variant labels ("P120") come from the attribute values, the same text the
+  // Mobile API puts in merged_name.
+  const attrIds = [...new Set(variants.flatMap(v => v.product_template_attribute_value_ids || []))];
+  const attrById = new Map<number, { name: string; display_name: string; attribute_id: number }>();
+  if (attrIds.length) {
+    try {
+      const raw = await jsonrpcCallKw('product.template.attribute.value', 'read', [attrIds], {
+        fields: ['id', 'name', 'display_name', 'attribute_id'],
+      });
+      const rows = Array.isArray(raw) ? raw : raw ? [raw] : [];
+      for (const a of rows as Array<{ id: number; name: string; display_name: string; attribute_id: [number, string] | false }>) {
+        attrById.set(a.id, {
+          name: a.name,
+          display_name: a.display_name,
+          attribute_id: Array.isArray(a.attribute_id) ? a.attribute_id[0] : 0,
+        });
+      }
+    } catch { /* variants still selectable, just unlabelled */ }
+  }
+
+  return {
+    id: row.id,
+    name: String(row.name || ''),
+    price: typeof row.list_price === 'number' ? row.list_price : 0,
+    cost: typeof row.standard_price === 'number' ? row.standard_price : 0,
+    internal_reference: typeof row.default_code === 'string' ? row.default_code : '',
+    barcode: typeof row.barcode === 'string' ? row.barcode : '',
+    description_sale: typeof row.description_sale === 'string' ? row.description_sale : '',
+    available_in_stock: typeof row.qty_available === 'number' ? Math.floor(row.qty_available) : 0,
+    category_id: category,
+    image_url: `${ODOO_URL}/web/image/product.template/${row.id}/image_1024`,
+    type: typeof row.type === 'string' ? row.type : 'consu',
+    bulk_deal_values: [],
+    variant_ids: variants.map(v => {
+      const attrs = (v.product_template_attribute_value_ids || [])
+        .map(a => attrById.get(a))
+        .filter(Boolean) as Array<{ name: string; display_name: string; attribute_id: number }>;
+      return {
+        id: v.id,
+        name: v.name,
+        merged_name: attrs.map(a => a.name).join(' / ') || v.name,
+        price: typeof v.lst_price === 'number' ? v.lst_price : 0,
+        internal_reference: typeof v.default_code === 'string' ? v.default_code : '',
+        barcode: typeof v.barcode === 'string' ? v.barcode : '',
+        attribute_values: attrs,
+      };
+    }),
+  };
+}
+
 export async function getProductById(_uid: number, _password: string, id: number) {
   const admin = await getAdminToken();
-  const result = (await mobileGet(`/api/v1/product_template/${id}`, admin)) as {
-    product_template?: MobileProduct;
-    success?: boolean;
-  } | null;
-  const product = result?.product_template;
+  let product: MobileProduct | undefined;
+  try {
+    const result = (await mobileGet(`/api/v1/product_template/${id}`, admin)) as {
+      product_template?: MobileProduct;
+      success?: boolean;
+    } | null;
+    product = result?.product_template;
+  } catch (err) {
+    if (!(err instanceof OdooMobileError)) throw err;
+    // The mobile module raises on products in more than one website category —
+    // without this the product simply 404s. See OdooMobileError.
+    console.error(`[odoo] Mobile product ${id} failed, falling back to JSON-RPC: ${err.message}`);
+    product = await buildProductViaRpc(id);
+  }
   if (!product || !product.id) return null;
   const normalized = normalizeMobileProduct(product);
 
@@ -495,11 +782,7 @@ export async function getProductsByTag(
   // Fetch products — include barcode for image lookup
   const rawProducts = await jsonrpcCallKw('product.template', 'search_read', [
     domain,
-    [
-      'id', 'name', 'default_code', 'list_price', 'standard_price',
-      'qty_available', 'virtual_available', 'categ_id', 'uom_id',
-      'image_128', 'product_tag_ids', 'type', 'barcode',
-    ],
+    TEMPLATE_CARD_FIELDS,
   ], {
     offset,
     limit,
@@ -507,28 +790,7 @@ export async function getProductsByTag(
     context: {},
   }) as MobileProduct[];
 
-  // Map JSON-RPC products to frontend format, preserving image data
-  const products = rawProducts.map(p => {
-    const imageUrl = p.image_128
-      ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128`
-      : null;
-    return {
-      id: p.id,
-      name: p.name,
-      default_code: p.default_code || false,
-      list_price: p.list_price || 0,
-      standard_price: p.standard_price || 0,
-      qty_available: p.qty_available || 0,
-      virtual_available: p.virtual_available || 0,
-      categ_id: p.categ_id || false,
-      uom_id: p.uom_id || false,
-      image_128: null,
-      image_url: imageUrl,
-      product_tag_ids: p.product_tag_ids || [],
-      type: p.type || 'consu',
-      barcode: p.barcode || '',
-    };
-  });
+  const products = rawProducts.map(toProductCard);
 
   return { products, total };
 }
@@ -543,35 +805,11 @@ export async function getProductsByIds(ids: number[]): Promise<{ products: Recor
   try {
     const rawProducts = await jsonrpcCallKw('product.template', 'search_read', [
       [['id', 'in', ids]],
-      [
-        'id', 'name', 'default_code', 'list_price', 'standard_price',
-        'qty_available', 'virtual_available', 'categ_id', 'uom_id',
-        'image_128', 'product_tag_ids', 'type', 'barcode',
-      ],
+      TEMPLATE_CARD_FIELDS,
     ], { context: {} }) as MobileProduct[];
 
     const byId = new Map<number, Record<string, unknown>>();
-    for (const p of rawProducts) {
-      const imageUrl = p.image_128
-        ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128`
-        : null;
-      byId.set(p.id, {
-        id: p.id,
-        name: p.name,
-        default_code: p.default_code || false,
-        list_price: p.list_price || 0,
-        standard_price: p.standard_price || 0,
-        qty_available: p.qty_available || 0,
-        virtual_available: p.virtual_available || 0,
-        categ_id: p.categ_id || false,
-        uom_id: p.uom_id || false,
-        image_128: null,
-        image_url: imageUrl,
-        product_tag_ids: p.product_tag_ids || [],
-        type: p.type || 'consu',
-        barcode: p.barcode || '',
-      });
-    }
+    for (const p of rawProducts) byId.set(p.id, toProductCard(p));
 
     // Preserve the caller's id order (search_read ignores it)
     const products = ids.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
@@ -606,88 +844,190 @@ export async function getSaleOrderLines(_uid: number, _password: string, orderId
   } catch { return []; }
 }
 
-// Products the partner has previously ordered, resolved from order-line
-// VARIANTs to product.template objects in ProductCard-ready shape,
-// most-recently-purchased first.
+// ─── Buy Again (purchase history) ─────────────────────────────────────────────
+
+// How far back Buy Again looks. Bounded by date rather than record count so a
+// heavy account doesn't lose its older products halfway down the list.
+const HISTORY_MONTHS = 24;
+// Safety valve on the invoice/order queries — a busy trade account has hundreds.
+const HISTORY_INVOICE_LIMIT = 400;
+const HISTORY_ORDER_LIMIT = 400;
+// Posted invoices are the richest source, but far from the only one: measured
+// across all 65 portal logins, 27 have sale orders and NO posted invoice at all,
+// and including orders takes 20 accounts from an empty Buy Again page to a
+// populated one. Orders placed in this app also stay draft until staff invoice
+// them, so invoice-only sourcing hid a customer's own order for days. Both
+// sources are merged, newest wins.
+const INCLUDE_SALE_ORDERS = true;
+// Every state except a cancelled order counts as "they wanted this product":
+// draft (Quotation — what this app creates at checkout), sent, sale, and the
+// site's custom `future` ("To Be Delivered").
+const NON_PURCHASE_ORDER_STATES = ['cancel'];
+// account.move.line holds every journal item, not just what the customer bought.
+// Anglo-saxon accounting adds `cogs` lines that carry a product_id and would
+// double the payload (verified: 1280 rows → 674, with zero unique products lost).
+const NON_PRODUCT_LINE_TYPES = ['cogs', 'tax', 'payment_term', 'rounding', 'line_section', 'line_note'];
+
+/**
+ * Trade accounts log in as a child contact ("Liam Rixon") while invoices are
+ * raised against the parent company. Resolving to the commercial partner is
+ * what lets that contact see the company's history instead of an empty page.
+ * Falls back to the given partner id if the lookup fails.
+ */
+async function getCommercialPartnerId(partnerId: number): Promise<number> {
+  try {
+    const rows = await jsonrpcCallKw('res.partner', 'read', [[partnerId]], {
+      fields: ['commercial_partner_id'],
+    }) as { commercial_partner_id?: [number, string] | false }[]
+      | { commercial_partner_id?: [number, string] | false } | null;
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    const cid = Array.isArray(row?.commercial_partner_id) ? row.commercial_partner_id[0] : null;
+    return cid || partnerId;
+  } catch { return partnerId; }
+}
+
+// ISO date HISTORY_MONTHS ago, e.g. '2024-07-29'
+function historyCutoff(): string {
+  const d = new Date();
+  d.setMonth(d.getMonth() - HISTORY_MONTHS);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * Products this customer has bought before, newest purchase first, in
+ * ProductCard-ready shape with an extra `last_purchased` (ISO date) field.
+ *
+ * Sourced from POSTED CUSTOMER INVOICES *and* SALE ORDERS, merged. Counter
+ * sales, phone and rep orders and migrated history exist as invoices; anything
+ * bought through this app or quoted by a rep exists only as a sale order until
+ * staff invoice it. Neither source alone covers the customer base. Archived
+ * products drop out naturally (Odoo's default active_test), so a discontinued
+ * line never appears as a dead card.
+ */
 export async function getPreviouslyPurchasedProducts(
   _uid: number, _password: string, partnerId: number
 ): Promise<{ products: Record<string, unknown>[] }> {
   try {
     if (!partnerId) return { products: [] };
+    const since = historyCutoff();
+    const commercialId = await getCommercialPartnerId(partnerId);
 
-    // 1. The partner's orders, newest first. Portal checkout creates orders as
-    //    draft quotations (staff confirm them later), so we include every state
-    //    except cancelled — matching getSaleOrders' "all the customer's orders".
-    const orders = (await jsonrpcCallKw('sale.order', 'search_read', [
-      [['partner_id', '=', partnerId], ['state', '!=', 'cancel']],
-      ['id'],
-    ], { order: 'date_order desc', limit: 100, context: {} })) as { id: number }[] ?? [];
-    const orderIds = orders.map(o => o.id);
-    if (orderIds.length === 0) return { products: [] };
+    // last purchase date per VARIANT, built from whichever sources are enabled
+    const variantLastDate = new Map<number, string>();
+    const noteVariant = (vid: number | null, date: string | null | undefined) => {
+      if (!vid || !date) return;
+      const prev = variantLastDate.get(vid);
+      if (!prev || prev < date) variantLastDate.set(vid, date);
+    };
 
-    // 2. Order lines → distinct variant ids, preserving most-recent-first order
-    const lines = (await jsonrpcCallKw('sale.order.line', 'search_read', [
-      [['order_id', 'in', orderIds], ['product_id', '!=', false]],
-      ['product_id'],
-    ], { order: 'id desc', context: {} })) as { product_id: [number, string] | false }[] ?? [];
-    const variantIds: number[] = [];
-    const seenVariant = new Set<number>();
-    for (const l of lines) {
-      const vid = Array.isArray(l.product_id) ? l.product_id[0] : null;
-      if (vid && !seenVariant.has(vid)) { seenVariant.add(vid); variantIds.push(vid); }
+    // 1. Posted customer invoices in the window, newest first
+    const invoices = (await jsonrpcCallKw('account.move', 'search_read', [
+      [
+        ['commercial_partner_id', '=', commercialId],
+        ['move_type', '=', 'out_invoice'],
+        ['state', '=', 'posted'],
+        ['invoice_date', '>=', since],
+      ],
+      ['id', 'invoice_date'],
+    ], { order: 'invoice_date desc', limit: HISTORY_INVOICE_LIMIT, context: {} })) as
+      { id: number; invoice_date: string | false }[] ?? [];
+
+    if (invoices.length) {
+      const invoiceDate = new Map<number, string>();
+      for (const inv of invoices) if (inv.invoice_date) invoiceDate.set(inv.id, inv.invoice_date);
+
+      // 2. Their product lines → variant ids, dated by the invoice they sit on
+      const lines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+        [
+          ['move_id', 'in', invoices.map(i => i.id)],
+          ['product_id', '!=', false],
+          ['display_type', 'not in', NON_PRODUCT_LINE_TYPES],
+        ],
+        ['move_id', 'product_id'],
+      ], { context: {} })) as { move_id: [number, string] | false; product_id: [number, string] | false }[] ?? [];
+
+      for (const l of lines) {
+        const moveId = Array.isArray(l.move_id) ? l.move_id[0] : null;
+        noteVariant(
+          Array.isArray(l.product_id) ? l.product_id[0] : null,
+          moveId ? invoiceDate.get(moveId) : null,
+        );
+      }
     }
-    if (variantIds.length === 0) return { products: [] };
 
-    // 3. Resolve variants → templates, preserving order & de-duplicating
-    const variants = (await jsonrpcCallKw('product.product', 'read', [variantIds], {
+    // 3. Optionally fold in sale orders (draft app checkouts not yet invoiced)
+    if (INCLUDE_SALE_ORDERS) {
+      // child_of, not '=': a company's orders can sit on the parent OR on any of
+      // its contacts, so an exact match silently drops the ones a named buyer
+      // placed under their own contact record.
+      const orders = (await jsonrpcCallKw('sale.order', 'search_read', [
+        [
+          ['partner_id', 'child_of', commercialId],
+          ['state', 'not in', NON_PURCHASE_ORDER_STATES],
+          ['date_order', '>=', since],
+        ],
+        ['id', 'date_order'],
+      ], { order: 'date_order desc', limit: HISTORY_ORDER_LIMIT, context: {} })) as
+        { id: number; date_order: string | false }[] ?? [];
+      if (orders.length) {
+        const orderDate = new Map<number, string>();
+        // date_order is a datetime; Buy Again only ever shows the day.
+        for (const o of orders) if (o.date_order) orderDate.set(o.id, String(o.date_order).slice(0, 10));
+        const orderLines = (await jsonrpcCallKw('sale.order.line', 'search_read', [
+          [
+            ['order_id', 'in', orders.map(o => o.id)],
+            ['product_id', '!=', false],
+            ['display_type', '=', false],
+          ],
+          ['order_id', 'product_id'],
+        ], { context: {} })) as { order_id: [number, string] | false; product_id: [number, string] | false }[] ?? [];
+        for (const l of orderLines) {
+          const oid = Array.isArray(l.order_id) ? l.order_id[0] : null;
+          noteVariant(
+            Array.isArray(l.product_id) ? l.product_id[0] : null,
+            oid ? orderDate.get(oid) : null,
+          );
+        }
+      }
+    }
+
+    if (variantLastDate.size === 0) return { products: [] };
+
+    // 4. Variants → templates, keeping the most recent date per template
+    const variants = (await jsonrpcCallKw('product.product', 'read', [[...variantLastDate.keys()]], {
       fields: ['product_tmpl_id'],
     })) as { id: number; product_tmpl_id: [number, string] | false }[] | { id: number; product_tmpl_id: [number, string] | false } | null;
     const variantRows = Array.isArray(variants) ? variants : variants ? [variants] : [];
-    const variantToTmpl = new Map<number, number>();
+    const tmplLastDate = new Map<number, string>();
     for (const v of variantRows) {
-      if (Array.isArray(v.product_tmpl_id)) variantToTmpl.set(v.id, v.product_tmpl_id[0]);
+      const tid = Array.isArray(v.product_tmpl_id) ? v.product_tmpl_id[0] : null;
+      const date = variantLastDate.get(v.id);
+      if (!tid || !date) continue;
+      const prev = tmplLastDate.get(tid);
+      if (!prev || prev < date) tmplLastDate.set(tid, date);
     }
-    const tmplIds: number[] = [];
-    const seenTmpl = new Set<number>();
-    for (const vid of variantIds) {
-      const tid = variantToTmpl.get(vid);
-      if (tid && !seenTmpl.has(tid)) { seenTmpl.add(tid); tmplIds.push(tid); }
-    }
-    if (tmplIds.length === 0) return { products: [] };
+    if (tmplLastDate.size === 0) return { products: [] };
 
-    // 4. Read templates in ProductCard shape (same mapping as getProductsByTag)
+    // 5. Newest purchase first, ties broken by id for a stable order
+    const tmplIds = [...tmplLastDate.keys()].sort((a, b) => {
+      const da = tmplLastDate.get(a)!, db = tmplLastDate.get(b)!;
+      return da === db ? b - a : (da < db ? 1 : -1);
+    });
+
+    // 6. Read the templates as cards and re-apply our ordering (search_read
+    //    returns them in its own order and silently omits archived products).
+    //    type != service drops the delivery/discount/VAT lines that sit on every
+    //    invoice (all 34 service products are charges, not goods), and sale_ok
+    //    drops anything staff have marked as not sellable.
     const rawProducts = (await jsonrpcCallKw('product.template', 'search_read', [
-      [['id', 'in', tmplIds]],
-      [
-        'id', 'name', 'default_code', 'list_price', 'standard_price',
-        'qty_available', 'virtual_available', 'categ_id', 'uom_id',
-        'image_128', 'product_tag_ids', 'type', 'barcode',
-      ],
+      [['id', 'in', tmplIds], ['type', '!=', 'service'], ['sale_ok', '=', true]],
+      TEMPLATE_CARD_FIELDS,
     ], { context: {} })) as MobileProduct[];
     const byId = new Map<number, Record<string, unknown>>();
     for (const p of rawProducts) {
-      const imageUrl = p.image_128
-        ? `${ODOO_URL}/web/image/product.template/${p.id}/image_128`
-        : null;
-      byId.set(p.id, {
-        id: p.id,
-        name: p.name,
-        default_code: p.default_code || false,
-        list_price: p.list_price || 0,
-        standard_price: p.standard_price || 0,
-        qty_available: p.qty_available || 0,
-        virtual_available: p.virtual_available || 0,
-        categ_id: p.categ_id || false,
-        uom_id: p.uom_id || false,
-        image_128: null,
-        image_url: imageUrl,
-        product_tag_ids: p.product_tag_ids || [],
-        type: p.type || 'consu',
-        barcode: p.barcode || '',
-      });
+      byId.set(p.id, { ...toProductCard(p), last_purchased: tmplLastDate.get(p.id) || null });
     }
 
-    // 5. Re-order to match purchase recency (search_read ignores our ordering)
     const products = tmplIds.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
     return { products };
   } catch { return { products: [] }; }

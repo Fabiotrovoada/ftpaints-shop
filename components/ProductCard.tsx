@@ -34,26 +34,20 @@ interface Product {
   sellers?: SellerInfo[];
   product_tag_ids?: number[];
   tag_names?: string[];
+  /** ISO date of the customer's most recent purchase — Buy Again only */
+  last_purchased?: string | null;
 }
 
-interface QuantityBreak {
-  qty: number;
-  price: number;
-}
-
-function getQuantityBreaks(price: number): QuantityBreak[] {
-  // Standard breaks — can be enhanced with Odoo pricelist data
-  return [
-    { qty: 5, price: price * 0.95 },
-    { qty: 10, price: price * 0.90 },
-    { qty: 20, price: price * 0.85 },
-  ];
+// '2026-03-12' → '12 Mar 2026'
+function formatPurchaseDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 export default function ProductCard({ product, onRemove }: { product: Product; onRemove?: () => void }) {
   const [qty, setQty] = useState(1);
   const [added, setAdded] = useState(false);
-  const [showBreaks, setShowBreaks] = useState(false);
   const router = useRouter();
   const [partNumber, setPartNumber] = useState('');
   const [partSaved, setPartSaved] = useState(false);
@@ -65,20 +59,14 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
   const exactQty = product.qty_available < 999 ? product.qty_available : null;
   const lowStock = inStock && exactQty !== null && exactQty <= 5;
   const isFav = isFavourite(product.id);
-  // FT Custom Mixed Paints are bespoke — no quantity breaks (shown or applied)
-  const categoryName = Array.isArray(product.categ_id) ? product.categ_id[1] : '';
-  const hideBreaks = categoryName.includes('FT Custom Mixed Paints');
-  // Use real quantity breaks from Odoo if available, otherwise generate standard breaks
-  const breaks = hideBreaks
-    ? []
-    : (product.quantity_breaks && product.quantity_breaks.length > 0)
-      ? product.quantity_breaks
-      : getQuantityBreaks(product.list_price);
-
-  // Current price based on qty
-  const currentBreak = [...breaks].reverse().find(b => qty >= b.qty);
-  const currentPrice = currentBreak ? currentBreak.price : product.list_price;
-  const saving = product.list_price - currentPrice;
+  // Custom-mixed paints and similar carry their price on the VARIANT, leaving the
+  // template at 0. Adding one from the card would put a £0.00 line in the basket
+  // with no size chosen, so those send the customer to the detail page instead.
+  const needsVariantChoice = !(product.list_price > 0);
+  // Quantity breaks are no longer offered — one price regardless of quantity,
+  // matching the product detail page. Partner pricing comes from the Odoo
+  // pricelist overlay applied server-side, not from qty tiers.
+  const currentPrice = product.list_price;
 
   function handleAdd() {
     addItem({
@@ -134,12 +122,6 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
         >
           {isFav ? '❤️' : '♡'}
         </button>
-        {/* Group discount badge */}
-        {breaks.length > 0 && (
-          <div className="absolute top-2 left-2 bg-[#ff8f00] text-white text-xs font-bold px-1.5 py-0.5 rounded">
-            Qty Breaks
-          </div>
-        )}
       </div>
 
       <div className="p-3 flex flex-col gap-2 flex-1">
@@ -150,46 +132,19 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
           {product.categ_id && (
             <p className="text-xs text-gray-400 mt-0.5 truncate">{(product.categ_id as [number,string])[1]}</p>
           )}
+          {product.last_purchased && (
+            <p className="text-xs text-[#004475]/70 font-medium mt-1 truncate">
+              🕘 Last ordered {formatPurchaseDate(product.last_purchased)}
+            </p>
+          )}
         </div>
 
         {/* Price */}
         <div className="flex items-baseline gap-2">
-          <span className="text-lg font-bold text-[#004475]">
-            £{currentPrice.toFixed(2)}
+          <span className={needsVariantChoice ? 'text-sm font-semibold text-gray-500' : 'text-lg font-bold text-[#004475]'}>
+            {needsVariantChoice ? 'Price varies by size' : `£${currentPrice.toFixed(2)}`}
           </span>
-          {saving > 0 && (
-            <span className="text-xs text-gray-400 line-through">£{product.list_price.toFixed(2)}</span>
-          )}
-          {saving > 0 && (
-            <span className="text-xs text-green-600 font-medium">-{((saving/product.list_price)*100).toFixed(0)}%</span>
-          )}
         </div>
-
-        {/* Quantity breaks toggle */}
-        {!hideBreaks && (
-          <>
-            <button
-              onClick={() => setShowBreaks(!showBreaks)}
-              className="text-left text-xs text-[#004475] font-medium hover:underline"
-            >
-              Quantity breaks {showBreaks ? '▲' : '▼'}
-            </button>
-
-            {showBreaks && (
-              <div className="bg-[#004475] rounded-lg p-2 text-xs space-y-1">
-                <div className="flex justify-between text-white/70">
-                  <span>1+</span><span className="font-medium">£{product.list_price.toFixed(2)}</span>
-                </div>
-                {breaks.map(b => (
-                  <div key={b.qty} className={`flex justify-between ${qty >= b.qty ? 'text-[#ff8f00] font-semibold' : 'text-white'}`}>
-                    <span>{b.qty}+</span>
-                    <span>£{b.price.toFixed(2)} <span className="text-white/50">(-{((product.list_price-b.price)/product.list_price*100).toFixed(0)}%)</span></span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
 
         {/* Stock status */}
         <span className={`badge-${inStock ? (lowStock ? 'lowstock' : 'instock') : 'available'} self-start`}>
@@ -205,6 +160,7 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
         {/* Qty stepper + Add */}
         <div className="flex flex-col gap-2 mt-auto">
           {/* Stepper row */}
+          {!needsVariantChoice && (
           <div className="flex items-stretch rounded-lg overflow-hidden border border-gray-200 h-9 w-full">
             <button
               onClick={() => setQty(q => Math.max(1, q-1))}
@@ -225,13 +181,23 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
               className="flex-shrink-0 w-10 bg-[#004475] hover:bg-[#003360] text-white font-bold text-lg flex items-center justify-center"
             >+</button>
           </div>
-          {/* Add to basket - full width */}
-          <button
-            onClick={handleAdd}
-            className={`w-full py-2 text-sm font-semibold rounded-lg transition-all ${added ? 'bg-green-500 text-white' : 'bg-[#ff8f00] hover:bg-[#e07d00] text-white'}`}
-          >
-            {added ? '✓ Added to Basket' : 'Add to Basket'}
-          </button>
+          )}
+          {/* Add to basket — or pick a size first, when the price lives on the variant */}
+          {needsVariantChoice ? (
+            <button
+              onClick={() => router.push(`/shop/${product.id}`)}
+              className="w-full py-2 text-sm font-semibold rounded-lg transition-all bg-[#004475] hover:bg-[#003360] text-white"
+            >
+              Choose size →
+            </button>
+          ) : (
+            <button
+              onClick={handleAdd}
+              className={`w-full py-2 text-sm font-semibold rounded-lg transition-all ${added ? 'bg-green-500 text-white' : 'bg-[#ff8f00] hover:bg-[#e07d00] text-white'}`}
+            >
+              {added ? '✓ Added to Basket' : 'Add to Basket'}
+            </button>
+          )}
           {/* Optional remove control (e.g. Buy Again — dismiss a product) */}
           {onRemove && (
             <button

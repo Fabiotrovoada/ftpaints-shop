@@ -1,6 +1,7 @@
 'use client';
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
 import { useSession } from 'next-auth/react';
+import { useSearchParams } from 'next/navigation';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import ProductCard from '@/components/ProductCard';
@@ -71,8 +72,25 @@ const COLLECTIONS = [
 ];
 
 export default function ShopPage() {
+  // useSearchParams needs a Suspense boundary or the production build fails
+  // ("Missing Suspense boundary with useSearchParams").
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center text-gray-400">Loading...</div>}>
+      <ShopPageInner />
+    </Suspense>
+  );
+}
+
+function ShopPageInner() {
   const { data: session } = useSession();
   const { ids: favIds } = useFavourites();
+  const searchParams = useSearchParams();
+  // A breadcrumb link or a shared/bookmarked URL can arrive with a category
+  // already chosen: /shop?categoryId=123.
+  const urlCategoryId = (() => {
+    const n = Number(searchParams.get('categoryId'));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
 
   const [products, setProducts]       = useState<Product[]>([]);
   const [total, setTotal]             = useState(0);
@@ -91,7 +109,9 @@ export default function ShopPage() {
   // On mount: open sidebar on desktop, check if first visit for hint
   useEffect(() => {
     const isMobile = window.innerWidth < 768;
-    setSidebarOpen(!isMobile);
+    // Arriving with a category from a link: show the sidebar even on mobile, so
+    // it's obvious what the grid has been filtered down to.
+    setSidebarOpen(!isMobile || urlCategoryId !== null);
     // Show hint on first visit (mobile only)
     if (isMobile) {
       const hintShown = localStorage.getItem('ftpaints-filter-hint');
@@ -106,12 +126,31 @@ export default function ShopPage() {
   // Filters
   const [search, setSearch]           = useState('');
   const [inStockOnly, setInStockOnly] = useState(false);
-  const [categoryId, setCategoryId]   = useState<number|null>(null);
+  const [categoryId, setCategoryId]   = useState<number|null>(urlCategoryId);
   const [collection, setCollection]   = useState('all');
   const [page, setPage]               = useState(0);
   const [sort, setSort]               = useState('name asc');
 
   const limit = 18;
+
+  /**
+   * Single entry point for picking a category, used by every level of the tree.
+   * Mirrors the choice into the URL so a category view can be bookmarked or sent
+   * to a customer, and so the breadcrumb link on a product page round-trips.
+   *
+   * history.replaceState rather than router.push/replace: Next syncs it into
+   * useSearchParams (see the shallow-routing guide) without a navigation, so the
+   * page keeps its loaded products, search text and scroll position, and Back
+   * still returns to wherever the customer came from instead of stepping back
+   * through every category they clicked.
+   */
+  const selectCategory = useCallback((id: number | null) => {
+    setCategoryId(id);
+    setSelectedTag(null);
+    setPage(0);
+    if (window.innerWidth < 768) setSidebarOpen(false);
+    window.history.replaceState(null, '', id ? `/shop?categoryId=${id}` : '/shop');
+  }, []);
 
   // Load categories once
   useEffect(() => {
@@ -197,6 +236,29 @@ export default function ShopPage() {
   const getGrandChildren = (parentId: number) => allCats.filter(c => c.parent_id && (c.parent_id as [number,string])[0] === parentId).sort((a,b) => a.name.localeCompare(b.name));
   const getGreatGrandChildren = (parentId: number) => allCats.filter(c => c.parent_id && (c.parent_id as [number,string])[0] === parentId).sort((a,b) => a.name.localeCompare(b.name));
 
+  // Arriving on a deep category (say a level-3 one, via a product breadcrumb)
+  // filters the grid correctly but leaves every branch of the tree collapsed, so
+  // nothing looks selected. Once the categories load, walk up parent_id from the
+  // linked category and open the chain down to it. Runs once, and only for the
+  // category the customer arrived on: expanding branches on their own later
+  // clicks would fight the ▶ toggles.
+  const didRevealCategory = useRef(false);
+  useEffect(() => {
+    if (didRevealCategory.current || !allCats.length) return;
+    didRevealCategory.current = true;
+    if (!urlCategoryId) return;
+    const byId = new Map(allCats.map(c => [c.id, c]));
+    const chain: number[] = [];
+    for (let c = byId.get(urlCategoryId); c && chain.length < 6; c = c.parent_id ? byId.get((c.parent_id as [number,string])[0]) : undefined) {
+      chain.unshift(c.id);
+    }
+    const [root, lvl2, lvl3] = chain;
+    if (root) setExpandedCat(root);
+    if (lvl2) setExpandedSubCat(lvl2);
+    if (lvl3) setExpandedSubSubCat(lvl3);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [categories]);
+
   return (
     <div className="min-h-screen bg-gray-50">
       <Navbar />
@@ -248,7 +310,7 @@ export default function ShopPage() {
             <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 space-y-5 sticky top-20">
               <div className="flex items-center justify-between">
                 <h3 className="font-bold text-gray-800 text-sm">Filters</h3>
-                <button onClick={() => { setCategoryId(null); setInStockOnly(false); setSearch(''); setSelectedTag(null); }}
+                <button onClick={() => { setCategoryId(null); setInStockOnly(false); setSearch(''); setSelectedTag(null); setPage(0); window.history.replaceState(null, '', '/shop'); }}
                   className="text-xs text-gray-400 hover:text-gray-600">Reset</button>
               </div>
 
@@ -286,6 +348,9 @@ export default function ShopPage() {
                           onClick={() => {
                             const newTagId = tag.id === selectedTag ? null : tag.id;
                             setSelectedTag(newTagId);
+                            // Brand and category are mutually exclusive here, so
+                            // drop the category from the URL along with the state.
+                            if (categoryId) window.history.replaceState(null, '', '/shop');
                             setCategoryId(null);
                             setPage(0);
                             if (newTagId) setProducts([]);
@@ -307,7 +372,7 @@ export default function ShopPage() {
                 <div className="space-y-0.5 max-h-[50vh] overflow-y-auto -mx-1 px-1">
                   {/* All Categories */}
                   <button
-                    onClick={() => { setCategoryId(null); setSelectedTag(null); setPage(0); setExpandedCat(null); setExpandedSubCat(null); setExpandedSubSubCat(null); if(window.innerWidth < 768) setSidebarOpen(false); }}
+                    onClick={() => { selectCategory(null); setExpandedCat(null); setExpandedSubCat(null); setExpandedSubSubCat(null); }}
                     className={`w-full text-left text-sm px-2 py-2 rounded-lg transition-colors font-medium ${!categoryId ? 'bg-[#004475] text-white' : 'text-gray-700 hover:bg-gray-100'}`}
                   >All Categories</button>
 
@@ -322,7 +387,7 @@ export default function ShopPage() {
                         {/* Brand category row */}
                         <div className={`flex items-center rounded-lg ${isActive ? 'bg-[#004475]' : 'hover:bg-gray-100'}`}>
                           <button
-                            onClick={() => { setCategoryId(cat.id); setSelectedTag(null); setPage(0); if(window.innerWidth < 768) setSidebarOpen(false); }}
+                            onClick={() => selectCategory(cat.id)}
                             className={`flex-1 text-left text-sm px-2 py-2 font-medium ${isActive ? 'text-white' : 'text-gray-700'}`}
                           >
                             {cat.name}
@@ -349,7 +414,7 @@ export default function ShopPage() {
                                 <div key={sub.id}>
                                   <div className={`flex items-center rounded-lg ${isSubActive ? 'bg-blue-50' : 'hover:bg-gray-50'}`}>
                                     <button
-                                      onClick={() => { setCategoryId(sub.id); setSelectedTag(null); setPage(0); if(window.innerWidth < 768) setSidebarOpen(false); }}
+                                      onClick={() => selectCategory(sub.id)}
                                       className={`flex-1 text-left text-xs px-2 py-1.5 ${isSubActive ? 'text-[#004475] font-semibold' : 'text-gray-600'}`}
                                     >
                                       {sub.name}
@@ -376,7 +441,7 @@ export default function ShopPage() {
                                           <div key={gsub.id}>
                                             <div className={`flex items-center rounded-lg ${isGSubActive ? 'bg-blue-50' : 'hover:bg-gray-50'}`}>
                                               <button
-                                                onClick={() => { setCategoryId(gsub.id); setPage(0); if(window.innerWidth < 768) setSidebarOpen(false); }}
+                                                onClick={() => selectCategory(gsub.id)}
                                                 className={`flex-1 text-left text-xs px-2 py-1.5 ${isGSubActive ? 'text-[#004475] font-semibold' : 'text-gray-600'}`}
                                               >
                                                 {gsub.name}
@@ -397,7 +462,7 @@ export default function ShopPage() {
                                                 {greatGrandChildren.map(ggsub => (
                                                   <button
                                                     key={ggsub.id}
-                                                    onClick={() => { setCategoryId(ggsub.id); setPage(0); if(window.innerWidth < 768) setSidebarOpen(false); }}
+                                                    onClick={() => selectCategory(ggsub.id)}
                                                     className={`w-full text-left text-xs px-2 py-1 rounded ${categoryId === ggsub.id ? 'text-[#004475] font-semibold' : 'text-gray-500 hover:text-gray-700'}`}
                                                   >
                                                     {ggsub.name}

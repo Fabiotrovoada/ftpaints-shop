@@ -29,7 +29,7 @@ export default function Footer() {
                 {/* TODO: replace with real phone number */}
                 <a href="tel:+44 24 7509 7860" className="hover:text-white transition-colors">Tel: +44 24 7509 7860</a>
               </li>
-              <li className="text-gray-400 text-xs pt-1">Mon–Fri 8am–5pm · Sat 8am–1pm</li>
+              <li className="text-gray-400 text-xs pt-1">Mon–Fri 8am–5:30pm · Sat 8am–2pm</li>
             </ul>
           </div>
 
