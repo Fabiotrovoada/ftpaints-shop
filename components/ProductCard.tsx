@@ -26,7 +26,10 @@ interface Product {
   description_sale?: string;
   barcode?: string;
   quantity_breaks?: Array<{ qty: number; price: number }>;
+  /** Number of Odoo variants. >1 means a size must be chosen before ordering. */
   variant_count?: number;
+  /** The single orderable product.product id, when the product has only one. */
+  variant_id?: number | null;
   offer?: string;
   shipping?: string;
   rating?: number;
@@ -36,6 +39,8 @@ interface Product {
   tag_names?: string[];
   /** ISO date of the customer's most recent purchase — Buy Again only */
   last_purchased?: string | null;
+  /** ISO timestamp of the last view — Recently Viewed only, injected client-side */
+  viewed_at?: string | null;
 }
 
 // '2026-03-12' → '12 Mar 2026'
@@ -45,7 +50,24 @@ function formatPurchaseDate(iso: string): string {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
-export default function ProductCard({ product, onRemove }: { product: Product; onRemove?: () => void }) {
+// Recent views read better relative ("2 days ago") — past a week the actual
+// date is more useful, so fall back to formatPurchaseDate.
+function formatRelativeDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((startOfDay(new Date()) - startOfDay(d)) / 86400000);
+  if (days <= 0) return 'today';
+  if (days === 1) return 'yesterday';
+  if (days <= 7) return `${days} days ago`;
+  return `on ${formatPurchaseDate(iso)}`;
+}
+
+export default function ProductCard({
+  product,
+  onRemove,
+  removeLabel = '✕ Remove from Buy Again',
+}: { product: Product; onRemove?: () => void; removeLabel?: string }) {
   const [qty, setQty] = useState(1);
   const [added, setAdded] = useState(false);
   const router = useRouter();
@@ -59,10 +81,15 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
   const exactQty = product.qty_available < 999 ? product.qty_available : null;
   const lowStock = inStock && exactQty !== null && exactQty <= 5;
   const isFav = isFavourite(product.id);
-  // Custom-mixed paints and similar carry their price on the VARIANT, leaving the
-  // template at 0. Adding one from the card would put a £0.00 line in the basket
-  // with no size chosen, so those send the customer to the detail page instead.
-  const needsVariantChoice = !(product.list_price > 0);
+  // Two reasons a card cannot add straight to the basket:
+  //  - Custom-mixed paints and similar carry their price on the VARIANT, leaving
+  //    the template at 0, so the basket would get a £0.00 line.
+  //  - Anything with several sizes needs one picked. The basket stores whatever id
+  //    it is given and the order writes it to sale.order.line.product_id, which
+  //    must be a product.product — a template id there is either rejected by Odoo
+  //    or, because the id ranges overlap, silently books an unrelated product.
+  // Both send the customer to the detail page to choose.
+  const needsVariantChoice = !(product.list_price > 0) || (product.variant_count ?? 1) > 1;
   // Quantity breaks are no longer offered — one price regardless of quantity,
   // matching the product detail page. Partner pricing comes from the Odoo
   // pricelist overlay applied server-side, not from qty tiers.
@@ -70,7 +97,10 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
 
   function handleAdd() {
     addItem({
-      id: product.id,
+      // The basket feeds sale.order.line.product_id, which must be a
+      // product.product. Adding the template id here booked whatever variant
+      // happened to share that id — a different product almost half the time.
+      id: product.variant_id ?? product.id,
       name: product.name,
       code: product.default_code || '',
       price: currentPrice,
@@ -137,6 +167,11 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
               🕘 Last ordered {formatPurchaseDate(product.last_purchased)}
             </p>
           )}
+          {product.viewed_at && (
+            <p className="text-xs text-[#004475]/70 font-medium mt-1 truncate">
+              👁 Viewed {formatRelativeDate(product.viewed_at)}
+            </p>
+          )}
         </div>
 
         {/* Price */}
@@ -186,14 +221,14 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
           {needsVariantChoice ? (
             <button
               onClick={() => router.push(`/shop/${product.id}`)}
-              className="w-full py-2 text-sm font-semibold rounded-lg transition-all bg-[#004475] hover:bg-[#003360] text-white"
+              className="w-full py-2 text-sm font-semibold rounded-lg transition-all bg-[#004475] hover:bg-[#003360] text-white cursor-pointer"
             >
               Choose size →
             </button>
           ) : (
             <button
               onClick={handleAdd}
-              className={`w-full py-2 text-sm font-semibold rounded-lg transition-all ${added ? 'bg-green-500 text-white' : 'bg-[#ff8f00] hover:bg-[#e07d00] text-white'}`}
+              className={`w-full cursor-pointer py-2 text-sm font-semibold rounded-lg transition-all ${added ? 'bg-green-500 text-white' : 'bg-[#ff8f00] hover:bg-[#e07d00] text-white'}`}
             >
               {added ? '✓ Added to Basket' : 'Add to Basket'}
             </button>
@@ -202,9 +237,9 @@ export default function ProductCard({ product, onRemove }: { product: Product; o
           {onRemove && (
             <button
               onClick={onRemove}
-              className="w-full py-1.5 text-xs font-medium text-gray-400 hover:text-red-500 transition-colors"
+              className="w-full py-1.5 text-xs font-medium text-gray-400 hover:text-red-500 transition-colors cursor-pointer"
             >
-              ✕ Remove from Buy Again
+              {removeLabel}
             </button>
           )}
         </div>

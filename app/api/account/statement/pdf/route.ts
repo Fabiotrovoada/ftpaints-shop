@@ -1,41 +1,66 @@
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getInvoices, getPartnerByUid, getPartnerInfo } from '@/lib/odoo';
+import { resolveAccountPartner, getPartnerInfo } from '@/lib/odoo';
+import { buildStatement, parseRange } from '@/lib/statement';
 
-export async function GET() {
+// Despite the /pdf path this returns HTML for the browser's own print-to-PDF —
+// deliberately, so the app carries no PDF-rendering dependency.
+
+const money = (n: number) => `£${n.toFixed(2)}`;
+const ukDate = (iso: string) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '—');
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
+}
+
+export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
+  const { from, to } = parseRange(req.nextUrl.searchParams);
+
   try {
-    const user = await getPartnerByUid(session.user.uid, '');
-    const partnerId = (user?.partner_id as [number, string])?.[0];
-    const partner = await getPartnerInfo(session.user.uid, '', partnerId);
-    const invoices = await getInvoices(session.user.uid, '', partnerId);
+    const { partnerId, commercialId } = await resolveAccountPartner(session.user.uid);
+    if (!partnerId || !commercialId) {
+      return NextResponse.json({ error: 'No partner record' }, { status: 404 });
+    }
 
-    const partnerName = (partner?.name as string) || session.user.email || 'Customer';
+    const [partner, statement] = await Promise.all([
+      getPartnerInfo(session.user.uid, '', partnerId),
+      buildStatement(partnerId, commercialId, from, to),
+    ]);
+
+    const partnerName = escapeHtml((partner?.name as string) || session.user.email || 'Customer');
     const now = new Date();
-    const totalInvoiced = invoices.reduce((s, i) => s + ((i.amount_total as number) || 0), 0);
-    const totalPaid = invoices.reduce((s, i) => s + (((i.amount_total as number) || 0) - ((i.amount_residual as number) || 0)), 0);
-    const totalOutstanding = invoices.reduce((s, i) => s + ((i.amount_residual as number) || 0), 0);
+    const { openingBalance, closingBalance, rows, totals } = statement;
 
-    const rows = invoices.map((inv) => {
-      const isOverdue = inv.payment_state !== 'paid' && inv.invoice_date_due && new Date(inv.invoice_date_due as string) < now;
-      const statusLabel = inv.payment_state === 'paid' ? 'Paid' : inv.payment_state === 'partial' ? 'Partial' : 'Unpaid';
-      const statusColor = inv.payment_state === 'paid' ? '#16a34a' : isOverdue ? '#dc2626' : '#d97706';
+    const rangeLabel = from || to
+      ? `${from ? ukDate(from) : 'Start'} – ${to ? ukDate(to) : ukDate(now.toISOString())}`
+      : 'All time';
+
+    const rowsHtml = rows.map(r => {
+      const isInvoice = r.kind === 'invoice';
+      const overdue = isInvoice && (r.outstanding ?? 0) > 0 && r.dueDate && new Date(r.dueDate) < now;
       return `
         <tr style="border-bottom:1px solid #f3f4f6;">
-          <td style="padding:8px 12px;font-family:monospace;font-weight:600;color:#004475;">${inv.name}</td>
-          <td style="padding:8px 12px;color:#4b5563;">${inv.invoice_date ? new Date(inv.invoice_date as string).toLocaleDateString('en-GB') : '—'}</td>
-          <td style="padding:8px 12px;color:${isOverdue ? '#dc2626' : '#4b5563'};">${inv.invoice_date_due ? new Date(inv.invoice_date_due as string).toLocaleDateString('en-GB') : '—'}${isOverdue ? ' ⚠' : ''}</td>
-          <td style="padding:8px 12px;"><span style="background:${statusColor}22;color:${statusColor};padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;">${statusLabel}</span></td>
-          <td style="padding:8px 12px;text-align:right;">£${(inv.amount_total as number).toFixed(2)}</td>
-          <td style="padding:8px 12px;text-align:right;font-weight:${(inv.amount_residual as number) > 0 ? '700' : '400'};color:${(inv.amount_residual as number) > 0 ? '#dc2626' : '#4b5563'};">${(inv.amount_residual as number) > 0 ? `£${(inv.amount_residual as number).toFixed(2)}` : '—'}</td>
+          <td style="padding:8px 12px;color:#4b5563;">${ukDate(r.date)}</td>
+          <td style="padding:8px 12px;">
+            <span style="background:${isInvoice ? '#dbeafe' : '#dcfce7'};color:${isInvoice ? '#1e40af' : '#166534'};padding:2px 8px;border-radius:12px;font-size:11px;font-weight:600;">
+              ${isInvoice ? 'Invoice' : 'Payment'}
+            </span>
+          </td>
+          <td style="padding:8px 12px;font-family:monospace;font-weight:600;color:#004475;">${escapeHtml(r.reference)}</td>
+          <td style="padding:8px 12px;color:${overdue ? '#dc2626' : '#4b5563'};">${isInvoice ? ukDate(r.dueDate || '') : '—'}${overdue ? ' ⚠' : ''}</td>
+          <td style="padding:8px 12px;text-align:right;">${r.debit ? money(r.debit) : '—'}</td>
+          <td style="padding:8px 12px;text-align:right;color:#16a34a;">${r.credit ? money(r.credit) : '—'}</td>
+          <td style="padding:8px 12px;text-align:right;font-weight:600;">${money(r.balance)}</td>
         </tr>`;
     }).join('');
 
     const html = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8"/>
   <title>Account Statement — ${partnerName}</title>
@@ -53,7 +78,12 @@ export async function GET() {
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     thead { background: #f3f4f6; }
     th { padding: 10px 12px; text-align: left; font-weight: 600; color: #374151; font-size: 12px; }
-    th:last-child, th:nth-last-child(2) { text-align: right; }
+    th.num { text-align: right; }
+    tfoot td { padding: 10px 12px; font-weight: 700; border-top: 2px solid #e5e7eb; }
+    .aged { display: flex; gap: 12px; margin-top: 28px; }
+    .aged div { flex: 1; background: #f9fafb; border-radius: 8px; padding: 12px 14px; font-size: 12px; }
+    .aged .label { color: #9ca3af; font-size: 11px; }
+    .aged .value { font-weight: 700; font-size: 15px; margin-top: 2px; }
     .footer { margin-top: 40px; font-size: 11px; color: #9ca3af; text-align: center; border-top: 1px solid #f3f4f6; padding-top: 16px; }
   </style>
 </head>
@@ -66,51 +96,75 @@ export async function GET() {
     <div class="meta">
       <h2>Account Statement</h2>
       <div>${partnerName}</div>
+      <div>Period: ${rangeLabel}</div>
       <div>Generated: ${now.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</div>
     </div>
   </div>
 
   <div class="summary">
     <div class="card">
-      <div class="label">Total Invoiced</div>
-      <div class="value" style="color:#004475;">£${totalInvoiced.toFixed(2)}</div>
+      <div class="label">Opening Balance</div>
+      <div class="value" style="color:#004475;">${money(openingBalance)}</div>
     </div>
     <div class="card">
-      <div class="label">Total Paid</div>
-      <div class="value" style="color:#16a34a;">£${totalPaid.toFixed(2)}</div>
+      <div class="label">Invoiced</div>
+      <div class="value" style="color:#004475;">${money(totals.invoiced)}</div>
     </div>
-    <div class="card" style="background:${totalOutstanding > 0 ? '#fff7ed' : '#f0fdf4'};">
-      <div class="label">Balance Outstanding</div>
-      <div class="value" style="color:${totalOutstanding > 0 ? '#d97706' : '#16a34a'};">£${totalOutstanding.toFixed(2)}</div>
+    <div class="card">
+      <div class="label">Paid</div>
+      <div class="value" style="color:#16a34a;">${money(totals.paid)}</div>
+    </div>
+    <div class="card" style="background:${closingBalance > 0 ? '#fff7ed' : '#f0fdf4'};">
+      <div class="label">Closing Balance</div>
+      <div class="value" style="color:${closingBalance > 0 ? '#d97706' : '#16a34a'};">${money(closingBalance)}</div>
     </div>
   </div>
 
   <table>
     <thead>
       <tr>
-        <th>Invoice</th>
         <th>Date</th>
+        <th>Type</th>
+        <th>Reference</th>
         <th>Due Date</th>
-        <th>Status</th>
-        <th style="text-align:right;">Total</th>
-        <th style="text-align:right;">Outstanding</th>
+        <th class="num">Charges</th>
+        <th class="num">Payments</th>
+        <th class="num">Balance</th>
       </tr>
     </thead>
-    <tbody>${rows}</tbody>
+    <tbody>
+      <tr style="border-bottom:1px solid #f3f4f6;background:#fafafa;">
+        <td style="padding:8px 12px;color:#6b7280;" colspan="6">Opening balance</td>
+        <td style="padding:8px 12px;text-align:right;font-weight:600;">${money(openingBalance)}</td>
+      </tr>
+      ${rowsHtml || `<tr><td colspan="7" style="padding:24px;text-align:center;color:#9ca3af;">No activity in this period</td></tr>`}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td colspan="6" style="text-align:right;">Closing balance</td>
+        <td style="text-align:right;">${money(closingBalance)}</td>
+      </tr>
+    </tfoot>
   </table>
 
+  <div class="aged">
+    <div><div class="label">Current</div><div class="value">${money(totals.aged.current)}</div></div>
+    <div><div class="label">1–30 days</div><div class="value">${money(totals.aged.d30)}</div></div>
+    <div><div class="label">31–60 days</div><div class="value">${money(totals.aged.d60)}</div></div>
+    <div><div class="label">60+ days</div><div class="value" style="color:${totals.aged.d90 > 0 ? '#dc2626' : '#111'};">${money(totals.aged.d90)}</div></div>
+  </div>
+
   <div class="footer">
-    FTPaints Ltd · All prices exclusive of VAT · 30-day account terms · Registered in England &amp; Wales
+    FTPaints Ltd · All prices exclusive of VAT · Registered in England &amp; Wales
   </div>
 </body>
 </html>`;
 
-    // Return as HTML for browser to print-to-PDF, or as downloadable HTML
     return new NextResponse(html, {
       status: 200,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
-        'Content-Disposition': `inline; filename="statement-${now.toISOString().slice(0,10)}.html"`,
+        'Content-Disposition': `inline; filename="statement-${now.toISOString().slice(0, 10)}.html"`,
       },
     });
   } catch (err) {

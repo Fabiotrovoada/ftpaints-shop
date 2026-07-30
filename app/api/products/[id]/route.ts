@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getProductById, applyPricelistToProducts } from '@/lib/odoo';
+import { getProductById, applyPricelistToProducts, copyForPricing } from '@/lib/odoo';
 import { cacheGet, cacheSet, TTL } from '@/lib/cache';
 
 export async function GET(
@@ -15,11 +15,12 @@ export async function GET(
   const id = parseInt(idStr);
   if (isNaN(id)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
 
-  // Overlay the partner's pricelist per request on a shallow copy (the cache is
-  // keyed without the partner, so we must never mutate the cached object).
+  // Overlay the partner's pricelist per request on a copy — the cache is keyed
+  // without the partner, so mutating the cached object would serve one partner's
+  // negotiated prices to the next.
   const withPartnerPricing = async (product: Record<string, unknown> | null | undefined) => {
     if (!product) return product ?? null;
-    const copy = { ...product };
+    const copy = copyForPricing(product);
     await applyPricelistToProducts(session.user.uid, '', [copy]);
     return copy;
   };

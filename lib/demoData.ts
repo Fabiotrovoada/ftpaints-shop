@@ -58,4 +58,52 @@ export const DEMO_CREDIT = {
   limit: 2000,
   used: 541.30,
   onStop: false,
+  paymentTerms: true,
+  paymentTermName: '30 Days End of Month',
+};
+
+export const DEMO_PROFILE = {
+  name: 'Liam Rixon',
+  email: 'demo@ftpaints.co.uk',
+  phone: '024 7509 7860',
+  mobile: '07700 900123',
+  company: 'Rixon Accident Repair Ltd',
+  address: 'Unit 12 Bishopgate Business Park, Coventry, CV1 4NA',
+  vat: 'GB345267705',
+  creditLimit: DEMO_CREDIT.limit,
+  creditUsed: DEMO_CREDIT.used,
+  paymentTermName: DEMO_CREDIT.paymentTermName,
+};
+
+export const DEMO_PAYMENTS = [
+  { id: 4001, name: 'BNK1/2026/0031', date: '2026-02-20', amount: 98.40, ref: 'INV/2026/00045' },
+  { id: 4002, name: 'BNK1/2026/0018', date: '2026-02-06', amount: 1245.00, ref: 'INV/2026/00031' },
+  { id: 4003, name: 'BNK1/2026/0044', date: '2026-03-05', amount: 422.30, ref: 'Part payment INV/2026/00078' },
+];
+
+// Keyed by order id — mirrors what getSaleOrderLines returns for a real order.
+export const DEMO_ORDER_LINES: Record<number, Array<{
+  id: number; product_id: [number, string]; product_uom_qty: number;
+  price_unit: number; price_subtotal: number; name: string;
+}>> = {
+  2001: [
+    { id: 5001, product_id: [1001, 'Novol GRAVIT 630 300ml'], product_uom_qty: 12, price_unit: 11.68, price_subtotal: 140.16, name: 'Novol GRAVIT 630 300ml' },
+    { id: 5002, product_id: [1003, '3M FFA1P2 Reusable Half Mask'], product_uom_qty: 4, price_unit: 15.27, price_subtotal: 61.08, name: '3M FFA1P2 Reusable Half Mask' },
+    { id: 5003, product_id: [1008, 'Jtape Fine Line Tape Orange'], product_uom_qty: 18, price_unit: 4.62, price_subtotal: 83.16, name: 'Jtape Fine Line Tape Orange' },
+  ],
+  2002: [
+    { id: 5004, product_id: [1007, 'Norton Multi-Air Pro A275 125mm P180'], product_uom_qty: 2, price_unit: 49.70, price_subtotal: 99.40, name: 'Norton Multi-Air Pro A275 125mm P180' },
+    { id: 5005, product_id: [1020, 'Fast Mover Paper Paint Strainer 125µ'], product_uom_qty: 3, price_unit: 17.69, price_subtotal: 53.07, name: 'Fast Mover Paper Paint Strainer 125µ' },
+  ],
+  2003: [
+    { id: 5006, product_id: [1004, 'PPG Deltron GRS UHS Hardener 2.5L'], product_uom_qty: 4, price_unit: 119.62, price_subtotal: 478.48, name: 'PPG Deltron GRS UHS Hardener 2.5L' },
+    { id: 5007, product_id: [1022, 'Worksafe Safety Spectacles Clear'], product_uom_qty: 6, price_unit: 7.45, price_subtotal: 44.70, name: 'Worksafe Safety Spectacles Clear' },
+  ],
+  2004: [
+    { id: 5008, product_id: [1024, 'CarTec Glass Cleaner Plus 1L'], product_uom_qty: 4, price_unit: 8.50, price_subtotal: 34.00, name: 'CarTec Glass Cleaner Plus 1L' },
+    { id: 5009, product_id: [1023, 'Measuring Jug with Flexible Spout 5L'], product_uom_qty: 2, price_unit: 24.95, price_subtotal: 49.90, name: 'Measuring Jug with Flexible Spout 5L' },
+  ],
+  2005: [
+    { id: 5010, product_id: [1015, 'Anest Iwata W-400 Bellaria Spray Gun'], product_uom_qty: 2, price_unit: 611.72, price_subtotal: 1223.44, name: 'Anest Iwata W-400 Bellaria Spray Gun' },
+  ],
 };

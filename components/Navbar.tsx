@@ -34,6 +34,7 @@ export default function Navbar() {
   const navLinks = [
     { href: '/shop', label: 'Shop' },
     { href: '/buy-again', label: 'Buy Again' },
+    { href: '/recently-viewed', label: 'Recently Viewed' },
     { href: '/replenishment', label: 'Replenishment' },
     { href: '/account', label: 'My Account' },
   ];
@@ -78,9 +79,13 @@ export default function Navbar() {
             {/* Credit badge */}
             <CreditBadge />
             {/* User */}
-            <span className="hidden md:block text-sm text-gray-300 truncate max-w-[160px]">
+            <Link
+              href="/account/profile"
+              className="hidden md:block text-sm text-gray-300 hover:text-white transition-colors truncate max-w-[160px]"
+              title="Your profile"
+            >
               {session?.user?.name || session?.user?.email}
-            </span>
+            </Link>
 
             <button
               onClick={() => signOut({ callbackUrl: '/' })}
@@ -112,6 +117,13 @@ export default function Navbar() {
               {l.label}
             </Link>
           ))}
+          <Link
+            href="/account/profile"
+            onClick={() => setMenuOpen(false)}
+            className="block text-sm font-medium text-gray-300 hover:text-white py-2"
+          >
+            Profile
+          </Link>
           <button
             onClick={() => signOut({ callbackUrl: '/' })}
             className="block text-sm text-gray-400 hover:text-white py-2"

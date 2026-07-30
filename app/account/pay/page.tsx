@@ -2,20 +2,9 @@
 import { useState, useEffect, Suspense } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import Navbar from '@/components/Navbar';
-import Footer from '@/components/Footer';
+import type { Invoice } from '@/types/account';
 
 export const dynamic = 'force-dynamic';
-
-interface Invoice {
-  id: number;
-  name: string;
-  invoice_date: string;
-  invoice_date_due: string;
-  amount_total: number;
-  amount_residual: number;
-  payment_state: string;
-}
 
 function PayPageInner() {
   const { data: session } = useSession();
@@ -115,9 +104,8 @@ function PayPageInner() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Navbar />
-      <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+    <div>
+      <div>
 
         <button onClick={() => router.push('/account')} className="text-sm text-gray-500 hover:text-gray-700 mb-4 flex items-center gap-1">
           ← Back to Account
@@ -295,7 +283,6 @@ function PayPageInner() {
           </div>
         )}
       </div>
-      <Footer />
     </div>
   );
 }
@@ -303,7 +290,7 @@ function PayPageInner() {
 
 export default function PayPage() {
   return (
-    <Suspense fallback={<div className="min-h-screen bg-gray-50 flex items-center justify-center text-gray-400">Loading...</div>}>
+    <Suspense fallback={<div className="card p-12 text-center text-gray-400">Loading...</div>}>
       <PayPageInner />
     </Suspense>
   );

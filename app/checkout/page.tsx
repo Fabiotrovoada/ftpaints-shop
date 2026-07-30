@@ -134,6 +134,10 @@ export default function CheckoutPage() {
   const [orderRef, setOrderRef] = useState('');
   const [placedTotal, setPlacedTotal] = useState(0);
   const [paymentError, setPaymentError] = useState('');
+  // Lines whose price the server corrected against the basket. Baskets live in
+  // localStorage indefinitely, so a stale price is routine — the customer has to
+  // be told, especially before they transfer a figure by BACS.
+  const [repriced, setRepriced] = useState<Array<{ productId: number; name: string; was: number; now: number }>>([]);
   const [deliveryAddress, setDeliveryAddress] = useState({ name: '', line1: '', line2: '', city: '', postcode: '' });
   const [savedAddress, setSavedAddress] = useState({ name: '', line1: '', line2: '', city: '', postcode: '' });
   const [useDifferentAddress, setUseDifferentAddress] = useState(false);
@@ -200,16 +204,31 @@ export default function CheckoutPage() {
         }),
       });
       const data = await res.json();
-      if (data.orderId) {
-        // Capture reference + total before clearBasket() empties the basket.
-        setOrderRef(data.orderName || `#${data.orderId}`);
-        setPlacedTotal(totalIncVat);
-        clearBasket();
-        setSuccess(true);
-        setStep('confirm');
+      if (!res.ok || !data.orderId) {
+        // Previously this failed silently and the button just re-enabled.
+        setPaymentError(data.error || 'We could not place your order. Please try again.');
+        return;
       }
+
+      // Prices are set by the server, so the basket's total can be out of date.
+      // Rebuild it from the corrections rather than showing a figure that will
+      // not match the quotation — or the amount to transfer.
+      const corrections: Array<{ productId: number; name: string; was: number; now: number }> = data.repriced || [];
+      const delta = corrections.reduce((sum, c) => {
+        const line = items.find(i => i.id === c.productId);
+        return sum + (c.now - c.was) * (line?.qty ?? 1);
+      }, 0);
+      setRepriced(corrections);
+
+      // Capture reference + total before clearBasket() empties the basket.
+      setOrderRef(data.orderName || `#${data.orderId}`);
+      setPlacedTotal((total + delta) * 1.2);
+      clearBasket();
+      setSuccess(true);
+      setStep('confirm');
     } catch (err) {
       console.error(err);
+      setPaymentError('We could not reach the server. Please try again.');
     } finally {
       setPlacing(false);
     }
@@ -243,6 +262,33 @@ export default function CheckoutPage() {
           {deliverySlot && (
             <div className="bg-green-50 border border-green-200 rounded-xl p-4 my-4 text-sm text-green-800">
               📅 {deliveryMethod === 'collection' ? 'Collection' : 'Delivery'} booked for <strong>{deliverySlot.label}</strong> {deliverySlot.time && `— ${deliverySlot.time}`}
+            </div>
+          )}
+
+          {/* Prices are authoritative on the server, so say so plainly when the
+              basket was out of date rather than letting the customer discover it
+              on the quotation. */}
+          {repriced.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 my-4 text-left text-sm text-amber-900">
+              <p className="font-semibold mb-2">
+                ⚠️ {repriced.length === 1 ? 'One price had' : `${repriced.length} prices had`} changed since
+                {repriced.length === 1 ? ' it was' : ' they were'} added to your basket
+              </p>
+              <ul className="space-y-1">
+                {repriced.map(r => (
+                  <li key={r.productId} className="flex justify-between gap-3">
+                    <span className="truncate">{r.name}</span>
+                    <span className="font-mono whitespace-nowrap">
+                      <span className="line-through text-amber-700/60">£{r.was.toFixed(2)}</span>
+                      {' → '}
+                      <strong>£{r.now.toFixed(2)}</strong>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-2 text-amber-800">
+                Your order was placed at the current prices. The total below is correct.
+              </p>
             </div>
           )}
 

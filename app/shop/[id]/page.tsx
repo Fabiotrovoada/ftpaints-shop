@@ -7,6 +7,7 @@ import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useBasket } from '@/lib/basketStore';
 import { useFavourites } from '@/lib/favourites';
+import { useRecentlyViewed } from '@/lib/recentlyViewed';
 
 interface VariantOption {
   id: number;
@@ -49,6 +50,8 @@ export default function ProductDetailPage() {
   const router = useRouter();
   const { addItem } = useBasket();
   const { toggle, isFavourite } = useFavourites();
+  // Selector, not the whole store — otherwise every recorded view re-renders this page.
+  const recordView = useRecentlyViewed(s => s.record);
 
   const [product, setProduct] = useState<Product | null>(null);
   const [loading, setLoading] = useState(true);
@@ -112,6 +115,12 @@ export default function ProductDetailPage() {
       .then(d => { setProduct(d.product); setLoading(false); })
       .catch(() => setLoading(false));
   }, [session, id]);
+
+  // Log the view only once the product actually resolved, so a 404 or a failed
+  // fetch never writes a dead id into the Recently Viewed list.
+  useEffect(() => {
+    if (product?.id) recordView(product.id);
+  }, [product?.id, recordView]);
 
   function handleAdd() {
     if (!product) return;

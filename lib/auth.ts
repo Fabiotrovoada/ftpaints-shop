@@ -40,7 +40,7 @@ export const authOptions: NextAuthOptions = {
     }),
   ],
   callbacks: {
-    async jwt({ token, user }) {
+    async jwt({ token, user, trigger, session }) {
       if (user) {
         const u = user as User;
         token.uid = u.uid;
@@ -48,6 +48,12 @@ export const authOptions: NextAuthOptions = {
         token.name = u.name;
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         // pricelist loaded lazily on checkout, not at login
+      }
+      // Lets the profile page push a renamed partner into the session via
+      // useSession().update({ name }) — without this the navbar keeps the old
+      // name until the next sign-in.
+      if (trigger === 'update' && typeof session?.name === 'string') {
+        token.name = session.name;
       }
       return token;
     },

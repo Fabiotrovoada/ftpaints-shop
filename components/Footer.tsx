@@ -59,6 +59,7 @@ export default function Footer() {
             <ul className="space-y-2 text-sm text-gray-300">
               <li><Link href="https://www.ftpaints.co.uk/ft/terms" className="hover:text-white transition-colors">Terms &amp; Conditions</Link></li>
               <li><Link href="https://www.ftpaints.co.uk/policy" className="hover:text-white transition-colors">Privacy Policy</Link></li>
+              <li><Link href="/cookies" className="hover:text-white transition-colors">Cookies</Link></li>
               <li><Link href="https://www.ftpaints.co.uk/shipping/information" className="hover:text-white transition-colors">Delivery &amp; Returns</Link></li>
               <li>
                 <a href="https://www.ftpaints.co.uk" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">www.ftpaints.co.uk</a>
