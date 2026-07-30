@@ -2,6 +2,7 @@
 import { useState } from 'react';
 import { signIn } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import Link from 'next/link';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
@@ -95,6 +96,11 @@ export default function LoginPage() {
         {/* Footer */}
         <p className="text-center text-gray-500 text-xs mt-6">
           © {new Date().getFullYear()} FTPaints Ltd · All prices exclusive of VAT
+        </p>
+        <p className="text-center text-xs mt-2">
+          <Link href="/cookies" className="text-gray-400 hover:text-gray-200 transition-colors">
+            Cookies &amp; local storage
+          </Link>
         </p>
       </div>
     </div>

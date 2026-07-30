@@ -308,7 +308,23 @@ function ShopPageInner() {
             overflow-y-auto md:overflow-visible
           `}>
             <div className="bg-white rounded-xl border border-gray-100 shadow-sm p-4 space-y-5 sticky top-20">
-              <div className="flex items-center justify-between">
+              {/* Sort */}
+              <div>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Sort by</p>
+                <select
+                  value={sort}
+                  onChange={e => { setSort(e.target.value); setPage(0); }}
+                  className="w-full text-sm border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#004475]"
+                >
+                  <option value="name asc">Name A-Z</option>
+                  <option value="name desc">Name Z-A</option>
+                  <option value="list_price asc">Price: Low to High</option>
+                  <option value="list_price desc">Price: High to Low</option>
+                  <option value="default_code asc">Product Code</option>
+                </select>
+              </div>
+
+              <div className="flex items-center justify-between border-t border-gray-100 pt-4">
                 <h3 className="font-bold text-gray-800 text-sm">Filters</h3>
                 <button onClick={() => { setCategoryId(null); setInStockOnly(false); setSearch(''); setSelectedTag(null); setPage(0); window.history.replaceState(null, '', '/shop'); }}
                   className="text-xs text-gray-400 hover:text-gray-600">Reset</button>
@@ -484,22 +500,6 @@ function ShopPageInner() {
                     );
                   })}
                 </div>
-              </div>
-
-              {/* Sort */}
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Sort by</p>
-                <select
-                  value={sort}
-                  onChange={e => { setSort(e.target.value); setPage(0); }}
-                  className="w-full text-sm border border-gray-200 rounded-lg px-2 py-1.5 focus:outline-none focus:ring-1 focus:ring-[#004475]"
-                >
-                  <option value="name asc">Name A-Z</option>
-                  <option value="name desc">Name Z-A</option>
-                  <option value="list_price asc">Price: Low to High</option>
-                  <option value="list_price desc">Price: High to Low</option>
-                  <option value="default_code asc">Product Code</option>
-                </select>
               </div>
             </div>
           </aside>

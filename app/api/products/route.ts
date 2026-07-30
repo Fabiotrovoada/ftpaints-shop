@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getProducts, getProductsByTag, getProductsByIds, applyPricelistToProducts } from '@/lib/odoo';
+import { getProducts, getProductsByTag, getProductsByIds, applyPricelistToProducts, copyForPricing } from '@/lib/odoo';
 import { cacheGet, cacheSet, TTL } from '@/lib/cache';
 import { DEMO_PRODUCTS } from '@/lib/demoData';
 
@@ -36,10 +36,11 @@ export async function GET(req: NextRequest) {
   }
 
   // The base product cache is keyed without the partner, but pricelist prices are
-  // per-partner — so overlay the partner's pricelist on a shallow copy per request
-  // (copy protects the shared cached objects from mutation).
+  // per-partner — so overlay the partner's pricelist on a copy per request.
+  // copyForPricing also clones variant_ids, which the Mobile API listing includes
+  // and which the pricelist now writes per-variant prices into.
   const withPartnerPricing = async (result: { products: unknown[]; total: number }) => {
-    const products = (result.products as Record<string, unknown>[]).map(p => ({ ...p }));
+    const products = (result.products as Record<string, unknown>[]).map(copyForPricing);
     await applyPricelistToProducts(session.user.uid, '', products);
     return { products, total: result.total };
   };

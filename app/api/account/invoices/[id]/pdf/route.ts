@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getInvoicePdf } from '@/lib/odoo';
+import { getInvoicePdf, resolveAccountPartner, assertOwnsRecord } from '@/lib/odoo';
 
 export async function GET(
   req: Request,
@@ -13,6 +13,14 @@ export async function GET(
   const { id } = await params;
   const invoiceId = parseInt(id);
   if (isNaN(invoiceId)) return NextResponse.json({ error: 'Invalid invoice ID' }, { status: 400 });
+
+  // Authorize, not just authenticate. Scoped to the commercial partner so a
+  // child contact keeps access to the company's documents. 404 rather than 403
+  // so the response does not confirm somebody else's invoice exists.
+  const { commercialId } = await resolveAccountPartner(session.user.uid);
+  if (!commercialId || !(await assertOwnsRecord('account.move', invoiceId, commercialId))) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
 
   // Opened as a browser tab (top-level navigation): return a tiny HTML shell whose
   // <title> controls the tab title, embedding the PDF full-screen. Chrome ignores the

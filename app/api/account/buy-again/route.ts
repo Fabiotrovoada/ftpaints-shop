@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getPreviouslyPurchasedProducts, getPartnerByUid, applyPricelistToProducts } from '@/lib/odoo';
+import { getPreviouslyPurchasedProducts, getPartnerByUid, applyPricelistToProducts, copyForPricing } from '@/lib/odoo';
 import { cacheGet, cacheSet, TTL } from '@/lib/cache';
 import { DEMO_PRODUCTS } from '@/lib/demoData';
 
@@ -31,7 +31,7 @@ export async function GET() {
     // Copy before pricing: applyPricelistToProducts mutates in place, and
     // writing one partner's negotiated prices onto the cached objects would
     // serve them to the next partner who hits the same cache entry.
-    const priced = products.map(p => ({ ...p }));
+    const priced = products.map(copyForPricing);
     await applyPricelistToProducts(session.user.uid, '', priced);
     return NextResponse.json({ products: priced, fromCache });
   } catch {

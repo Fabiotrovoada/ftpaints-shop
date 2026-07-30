@@ -39,4 +39,5 @@ export const TTL = {
   INVOICES: 120,      // 2 min — invoices
   BUY_AGAIN: 300,     // 5 min — purchase history (several Odoo round-trips)
   SESSION: 30,        // 30 sec — session/auth
+  PARTNER: 300,       // 5 min — uid → partner/commercial id (rarely changes)
 };

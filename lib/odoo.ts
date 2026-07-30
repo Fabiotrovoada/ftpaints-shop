@@ -15,6 +15,13 @@ const ODOO_DB = process.env.ODOO_DB!;
 import * as https from 'https';
 import * as http from 'http';
 import { cacheGet, cacheSet, TTL } from './cache';
+import {
+  applyPricelist,
+  PRICELIST_ITEM_FIELDS,
+  PRICELIST_ITEM_ORDER,
+  type PricelistInfo,
+  type PricelistItem,
+} from './pricelist';
 
 function httpsGetWithBody(urlStr: string, body: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -200,10 +207,93 @@ export async function getPartnerByUid(uid: number, _password: string): Promise<R
 export async function getPartnerInfo(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown> | null> {
   try {
     return (await jsonrpcCallKw('res.partner', 'read', [[partnerId]], {
-      fields: ['name', 'email', 'phone', 'street', 'city', 'zip', 'country_id',
-               'credit', 'credit_limit', 'property_payment_term_id'],
+      fields: ['name', 'email', 'phone', 'mobile', 'street', 'street2', 'city', 'zip', 'country_id',
+               'vat', 'commercial_partner_id', 'credit', 'credit_limit', 'property_payment_term_id'],
     })) as Record<string, unknown> | null;
   } catch { return null; }
+}
+
+// ─── Account area ─────────────────────────────────────────────────────────────
+
+/**
+ * uid → the contact's own partner id and their commercial (company) partner id.
+ * Every account route needs both: writes and the profile view target the
+ * contact, while documents and history are scoped to the company.
+ *
+ * Cached because it is two RPCs that almost never change, and every page in the
+ * account area hits it.
+ */
+export async function resolveAccountPartner(
+  uid: number
+): Promise<{ partnerId: number | null; commercialId: number | null }> {
+  const key = `partner:${uid}`;
+  const hit = cacheGet<{ partnerId: number | null; commercialId: number | null }>(key);
+  if (hit) return hit;
+  try {
+    const user = await getPartnerByUid(uid, '');
+    const partnerId = (user?.partner_id as [number, string] | undefined)?.[0] ?? null;
+    if (!partnerId) return { partnerId: null, commercialId: null };
+    const commercialId = await getCommercialPartnerId(partnerId);
+    const resolved = { partnerId, commercialId };
+    cacheSet(key, resolved, TTL.PARTNER);
+    return resolved;
+  } catch {
+    return { partnerId: null, commercialId: null };
+  }
+}
+
+export async function getPartnerProfile(partnerId: number): Promise<Record<string, unknown> | null> {
+  try {
+    return (await jsonrpcCallKw('res.partner', 'read', [[partnerId]], {
+      fields: ['name', 'email', 'phone', 'mobile', 'street', 'street2', 'city', 'zip',
+               'country_id', 'vat', 'commercial_partner_id'],
+    })) as Record<string, unknown> | null;
+  } catch { return null; }
+}
+
+/**
+ * Whitelisted write — caller input is never spread into the vals, so a crafted
+ * body cannot reach fields like `credit_limit` or `email` (the login).
+ */
+export async function updatePartnerProfile(
+  partnerId: number,
+  fields: { name?: string; phone?: string; mobile?: string }
+): Promise<boolean> {
+  try {
+    const vals: Record<string, string> = {};
+    if (typeof fields.name === 'string') vals.name = fields.name;
+    if (typeof fields.phone === 'string') vals.phone = fields.phone;
+    if (typeof fields.mobile === 'string') vals.mobile = fields.mobile;
+    if (Object.keys(vals).length === 0) return true;
+    await jsonrpcCallKw('res.partner', 'write', [[partnerId], vals]);
+    return true;
+  } catch { return false; }
+}
+
+/** Odoo's res.users.write hashes the password itself — never pre-hash here. */
+export async function changeUserPassword(uid: number, newPassword: string): Promise<boolean> {
+  try {
+    await jsonrpcCallKw('res.users', 'write', [[uid], { password: newPassword }]);
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Does this record belong to the customer's company? Used by the PDF routes,
+ * which authenticate but historically did not authorize — any signed-in user
+ * could read any order or invoice by guessing an id.
+ */
+export async function assertOwnsRecord(
+  model: 'sale.order' | 'account.move',
+  id: number,
+  commercialId: number
+): Promise<boolean> {
+  try {
+    const count = await jsonrpcCallKw(model, 'search_count', [
+      [['id', '=', id], ['partner_id', 'child_of', commercialId]],
+    ]) as number;
+    return count > 0;
+  } catch { return false; }
 }
 
 // ─── Field normalizer: Mobile API → Frontend format ──────────────────────────
@@ -255,6 +345,8 @@ interface MobileProduct {
   categ_id?: [number, string] | false;
   uom_id?: [number, string] | false;
   image_128?: string;
+  product_variant_count?: number;
+  product_variant_id?: [number, string] | false;
 }
 
 function normalizeMobileProduct(p: MobileProduct) {
@@ -282,6 +374,8 @@ function normalizeMobileProduct(p: MobileProduct) {
     barcode: p.barcode || '',
     quantity_breaks: p.bulk_deal_values || [],
     variant_count: (p.variant_ids || []).length,
+    // See toProductCard — the one orderable product.product, when unambiguous.
+    variant_id: p.variant_ids?.length === 1 ? p.variant_ids[0].id : null,
     // Include full variant details for product detail page
     variant_ids: Array.isArray(p.variant_ids) ? p.variant_ids : [],
     offer: p.offer || '',
@@ -301,6 +395,11 @@ export const TEMPLATE_CARD_FIELDS = [
   'id', 'name', 'default_code', 'list_price', 'standard_price',
   'qty_available', 'virtual_available', 'categ_id', 'uom_id',
   'image_128', 'product_tag_ids', 'type', 'barcode',
+  // Cards must know whether a size still has to be chosen, and which variant to
+  // put in the basket — sale.order.line.product_id is a product.product, and a
+  // template id there resolves to an unrelated product. The Mobile API path
+  // derives both from variant_ids.
+  'product_variant_count', 'product_variant_id',
 ];
 
 function toProductCard(p: MobileProduct): Record<string, unknown> {
@@ -319,6 +418,12 @@ function toProductCard(p: MobileProduct): Record<string, unknown> {
     product_tag_ids: p.product_tag_ids || [],
     type: p.type || 'consu',
     barcode: p.barcode || '',
+    variant_count: p.product_variant_count ?? (p.variant_ids || []).length,
+    // The product.product to order when there is only one. Null for multi-variant
+    // products — those must go through the detail page to pick a size.
+    variant_id: Array.isArray(p.product_variant_id)
+      ? p.product_variant_id[0]
+      : (p.variant_ids?.length === 1 ? p.variant_ids[0].id : null),
   };
 }
 
@@ -657,23 +762,30 @@ export async function getProductById(_uid: number, _password: string, id: number
   if (normalized.variant_ids && normalized.variant_ids.length > 0) {
     const variantIds = normalized.variant_ids.map((v: { id: number }) => v.id);
     try {
+      // standard_price rides along on a read that was happening anyway — cost is
+      // per-variant, and cost-based pricelist rules need it to price a size.
       const variantStocksRaw = await jsonrpcCallKw('product.product', 'read', [variantIds], {
-        fields: ['id', 'qty_available', 'virtual_available'],
+        fields: ['id', 'qty_available', 'virtual_available', 'standard_price'],
       });
       // product.product read can return either an array or a dict keyed by id
-      let stockMap: Map<number, { qty_available: number; virtual_available: number }>;
+      type VariantRow = { id: number; qty_available: number; virtual_available: number; standard_price?: number };
+      let stockMap: Map<number, VariantRow>;
       if (Array.isArray(variantStocksRaw)) {
-        stockMap = new Map((variantStocksRaw as Array<{ id: number; qty_available: number; virtual_available: number }>).map(s => [s.id, s]));
+        stockMap = new Map((variantStocksRaw as VariantRow[]).map(s => [s.id, s]));
       } else {
         // Dict format: { "139022": { id, qty_available, ... }, ... }
-        stockMap = new Map(Object.values(variantStocksRaw as Record<string, { id: number; qty_available: number; virtual_available: number }>).map(s => [s.id, s]));
+        stockMap = new Map(Object.values(variantStocksRaw as Record<string, VariantRow>).map(s => [s.id, s]));
       }
-      console.log(`[DEBUG] Variant stocks for template ${id}:`, Array.from(stockMap.entries()).slice(0, 2));
       // Enrich each variant with its stock data
       normalized.variant_ids = normalized.variant_ids.map(v => {
         const stock = stockMap.get(v.id);
         if (stock) {
-          return { ...v, qty_available: stock.qty_available, virtual_available: stock.virtual_available };
+          return {
+            ...v,
+            qty_available: stock.qty_available,
+            virtual_available: stock.virtual_available,
+            standard_price: stock.standard_price ?? 0,
+          };
         }
         return v;
       });
@@ -821,11 +933,18 @@ export async function getProductsByIds(ids: number[]): Promise<{ products: Recor
 
 // ─── Orders ───────────────────────────────────────────────────────────────────
 
+/**
+ * Scoped to the COMMERCIAL partner (`child_of`), not the exact contact, so a
+ * child-contact login sees the company's orders. This deliberately matches
+ * getPreviouslyPurchasedProducts — before, Buy Again was built from orders the
+ * Orders page refused to show.
+ */
 export async function getSaleOrders(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown>[]> {
   try {
+    const commercialId = await getCommercialPartnerId(partnerId);
     // Include all states: draft=Quotation, sent=Quotation Sent, sale=Confirmed, done=Done, cancel=Cancelled
     return (await jsonrpcCallKw('sale.order', 'search_read', [
-      [['partner_id', '=', partnerId]],
+      [['partner_id', 'child_of', commercialId]],
       ['id', 'name', 'date_order', 'amount_total', 'state', 'order_line', 'note'],
     ], {
       order: 'date_order desc',
@@ -874,7 +993,7 @@ const NON_PRODUCT_LINE_TYPES = ['cogs', 'tax', 'payment_term', 'rounding', 'line
  * what lets that contact see the company's history instead of an empty page.
  * Falls back to the given partner id if the lookup fails.
  */
-async function getCommercialPartnerId(partnerId: number): Promise<number> {
+export async function getCommercialPartnerId(partnerId: number): Promise<number> {
   try {
     const rows = await jsonrpcCallKw('res.partner', 'read', [[partnerId]], {
       fields: ['commercial_partner_id'],
@@ -1033,11 +1152,179 @@ export async function getPreviouslyPurchasedProducts(
   } catch { return { products: [] }; }
 }
 
+export interface OrderLineInput {
+  productId: number;
+  qty: number;
+  price: number;
+  name?: string;
+  colours?: Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }>;
+  colourName?: string;
+  colourCode?: string;
+}
+
+/** One basket line, resolved to a real Odoo variant and priced by the server. */
+interface ResolvedLine {
+  variantId: number;
+  tmplId: number;
+  listPrice: number;
+  costPrice: number;
+  categId: number;
+  displayName: string;
+}
+
+export class OrderLineError extends Error {
+  constructor(readonly items: string[]) {
+    super(
+      items.length === 1
+        ? `${items[0]} can no longer be ordered as it is — please remove it and add it again from the product page.`
+        : `${items.length} items can no longer be ordered as they are — please remove them and add them again from their product pages: ${items.join('; ')}`
+    );
+    this.name = 'OrderLineError';
+  }
+}
+
+/**
+ * Turn basket ids into real `product.product` ids, with the prices Odoo would use.
+ *
+ * Two things make this necessary. First, `sale.order.line.product_id` must be a
+ * product.product, but ProductCard puts a product.TEMPLATE id in the basket while
+ * the detail page puts a variant id — and the two id sequences overlap, so a
+ * template id often resolves to a real but completely unrelated variant. Second,
+ * the price arrives from the browser, where it may be stale (baskets live in
+ * localStorage indefinitely) or simply edited.
+ */
+async function resolveOrderLines(lines: OrderLineInput[]): Promise<Map<number, ResolvedLine>> {
+  const resolved = new Map<number, ResolvedLine>();
+  const ids = [...new Set(lines.map(l => Number(l.productId)).filter(Boolean))];
+  if (!ids.length) return resolved;
+
+  type VariantRow = {
+    id: number; display_name: string; lst_price: number;
+    standard_price: number; product_tmpl_id: [number, string];
+  };
+  const readVariants = async (variantIds: number[]): Promise<VariantRow[]> => {
+    if (!variantIds.length) return [];
+    const raw = await jsonrpcCallKw('product.product', 'search_read', [
+      [['id', 'in', variantIds]],
+      ['id', 'display_name', 'lst_price', 'standard_price', 'product_tmpl_id'],
+    ], { context: {} }) as VariantRow[] | null;
+    return raw || [];
+  };
+
+  // An id can be BOTH a valid variant and a valid template — 45.6% of sellable
+  // template ids also exist as a product.product, pointing at something
+  // unrelated. So look up both readings and let the basket's product name break
+  // the tie, rather than assuming one and silently ordering the wrong thing.
+  type TmplRow = {
+    id: number; name: string; categ_id: [number, string] | false;
+    product_variant_id: [number, string] | false; product_variant_count: number;
+  };
+  const [asVariants, asTemplates] = await Promise.all([
+    readVariants(ids),
+    jsonrpcCallKw('product.template', 'search_read', [
+      [['id', 'in', ids]], ['id', 'name', 'categ_id', 'product_variant_id', 'product_variant_count'],
+    ], { context: {} }) as Promise<TmplRow[] | null>,
+  ]);
+  const variantById = new Map((asVariants || []).map(v => [v.id, v]));
+  const tmplById = new Map((asTemplates || []).map(t => [t.id, t]));
+
+  // A card puts a template id in the basket, so the template reading may need its
+  // own variant fetched. Only single-variant templates can be resolved: with
+  // several sizes there is no way to know which the customer meant.
+  const tmplVariantIds = [...tmplById.values()]
+    .filter(t => t.product_variant_count === 1 && Array.isArray(t.product_variant_id))
+    .map(t => (t.product_variant_id as [number, string])[0])
+    .filter(vid => !variantById.has(vid));
+  for (const v of await readVariants(tmplVariantIds)) variantById.set(v.id, v);
+
+  // Categories for the pricelist, across every template either reading touches.
+  const allTmplIds = [...new Set([
+    ...[...variantById.values()].map(v => v.product_tmpl_id[0]),
+    ...tmplById.keys(),
+  ])];
+  const tmplMeta = await jsonrpcCallKw('product.template', 'search_read', [
+    [['id', 'in', allTmplIds]], ['id', 'name', 'categ_id'],
+  ], { context: {} }) as Array<{ id: number; name: string; categ_id: [number, string] | false }> | null;
+  const metaByTmpl = new Map((tmplMeta || []).map(t => [t.id, t]));
+
+  // Both the card and the detail page send the template's name (the detail page
+  // appends the size), so the basket name should start with it.
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, ' ').trim();
+  const nameMatches = (basketName: string | undefined, tmplId: number) => {
+    const tname = metaByTmpl.get(tmplId)?.name;
+    if (!basketName || !tname) return null;   // nothing to judge on
+    return norm(basketName).startsWith(norm(tname));
+  };
+
+  const ambiguous: string[] = [];
+  const nameByInput = new Map(lines.map(l => [Number(l.productId), l.name]));
+
+  for (const inputId of ids) {
+    const asVariant = variantById.get(inputId) ?? null;
+    const tmpl = tmplById.get(inputId) ?? null;
+    const viaTmpl = tmpl && tmpl.product_variant_count === 1 && Array.isArray(tmpl.product_variant_id)
+      ? variantById.get(tmpl.product_variant_id[0]) ?? null
+      : null;
+
+    const basketName = nameByInput.get(inputId);
+    let v: VariantRow | null;
+
+    if (asVariant && tmpl && asVariant.product_tmpl_id[0] !== tmpl.id) {
+      // The id reads as two different products. Only the name the customer saw
+      // can say which they meant — and note viaTmpl is null when the template has
+      // several sizes, in which case "they meant the template" still isn't
+      // orderable. Falling back to the variant reading here is exactly the bug
+      // this guard exists to stop.
+      const variantOk = nameMatches(basketName, asVariant.product_tmpl_id[0]) === true;
+      const tmplOk = nameMatches(basketName, tmpl.id) === true;
+      if (variantOk && !tmplOk) v = asVariant;
+      else if (tmplOk && !variantOk) v = viaTmpl;
+      else v = null;
+      if (!v) {
+        console.warn(
+          `[order] id ${inputId} is both variant "${asVariant.display_name}" and template ` +
+          `"${tmpl.name}"; basket says "${basketName ?? '(no name)'}" — refusing the line`
+        );
+        ambiguous.push(basketName || `product ${inputId}`);
+        continue;
+      }
+    } else {
+      v = asVariant ?? viaTmpl;
+    }
+
+    if (!v) {
+      // A multi-variant template with no size chosen lands here too.
+      ambiguous.push(basketName || tmpl?.name || `product ${inputId}`);
+      continue;
+    }
+
+    const tmplId = v.product_tmpl_id[0];
+    const categ = metaByTmpl.get(tmplId)?.categ_id;
+    resolved.set(inputId, {
+      variantId: v.id,
+      tmplId,
+      listPrice: v.lst_price || 0,
+      costPrice: v.standard_price || 0,
+      categId: Array.isArray(categ) ? categ[0] : 0,
+      displayName: v.display_name || `product ${inputId}`,
+    });
+  }
+  if (ambiguous.length) throw new OrderLineError(ambiguous);
+  return resolved;
+}
+
+export interface CreatedOrder {
+  id: number;
+  name: string;
+  /** Lines whose server price differed from the one the basket sent. */
+  repriced: Array<{ productId: number; name: string; was: number; now: number }>;
+}
+
 export async function createSaleOrder(
-  _uid: number, _password: string, partnerId: number,
-  lines: Array<{ productId: number; qty: number; price: number; name?: string; colours?: Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }>; colourName?: string; colourCode?: string }>,
+  uid: number, password: string, partnerId: number,
+  lines: OrderLineInput[],
   note?: string
-): Promise<{ id: number; name: string }> {
+): Promise<CreatedOrder> {
   // Render one colour spec ("Colour: X, Colour code: Y, Vehicle: MAKE MODEL YEAR")
   // from a customer-entered colour/vehicle pair.
   const colourSpec = (c: { name?: string; code?: string; make?: string; model?: string; year?: string }) => [
@@ -1045,9 +1332,35 @@ export async function createSaleOrder(
     c.code ? `Colour code: ${c.code.toUpperCase()}` : '',
     [c.make, c.model, c.year].some(Boolean) ? `Vehicle: ${[c.make, c.model, c.year].filter(Boolean).join(' ')}` : '',
   ].filter(Boolean).join(', ');
+
+  const resolved = await resolveOrderLines(lines);
+  const pricelist = await getPartnerPricelistCached(uid, password);
+  const ancestryByCat = await getCategoryAncestries([...resolved.values()].map(r => r.categId));
+  const repriced: CreatedOrder['repriced'] = [];
+
   const orderLines = lines.map((l) => {
+    const r = resolved.get(Number(l.productId))!;
+    // The server price wins. `qty` matters here and nowhere else — min_quantity
+    // rules are the one part of a pricelist that depends on how many you buy.
+    let price = r.listPrice;
+    if (pricelist?.items.length) {
+      const out = applyPricelist(pricelist, {
+        tmplId: r.tmplId,
+        variantId: r.variantId,
+        listPrice: r.listPrice,
+        costPrice: r.costPrice,
+        qty: l.qty,
+        categAncestry: r.categId ? (ancestryByCat.get(r.categId) || [r.categId]) : [],
+      });
+      price = out.price;
+    }
+    price = round2(price);
+    if (Math.abs(price - (Number(l.price) || 0)) >= 0.01) {
+      repriced.push({ productId: l.productId, name: r.displayName, was: round2(Number(l.price) || 0), now: price });
+    }
+
     const line: Record<string, unknown> = {
-      product_id: l.productId, product_uom_qty: l.qty, price_unit: l.price,
+      product_id: r.variantId, product_uom_qty: l.qty, price_unit: price,
     };
     // For bespoke custom-mixed paints, fold the customer's colour spec into the
     // line description so it prints on the quotation the team mixes from. Newer
@@ -1065,9 +1378,14 @@ export async function createSaleOrder(
     }
     return [0, 0, line];
   });
-  const id = await jsonrpcCallKw('sale.order', 'create', [{
+  const order: Record<string, unknown> = {
     partner_id: partnerId, order_line: orderLines, note: note || '',
-  }]) as number;
+  };
+  // Name the pricelist on the order so the prices above are self-explanatory to
+  // whoever opens the quotation in Odoo.
+  if (pricelist) order.pricelist_id = pricelist.id;
+
+  const id = await jsonrpcCallKw('sale.order', 'create', [order]) as number;
   // Read back the human-friendly order reference (e.g. "S00123") for the
   // customer to quote — e.g. as a bank-transfer payment reference.
   let name = '';
@@ -1077,20 +1395,69 @@ export async function createSaleOrder(
     const row = Array.isArray(rec) ? rec[0] : rec;
     name = row?.name || '';
   } catch { /* name is best-effort; id is authoritative */ }
-  return { id, name };
+  if (repriced.length) {
+    console.warn(`[order ${name || id}] repriced ${repriced.length} line(s) against the basket:`,
+      repriced.map(r => `${r.name} ${r.was}→${r.now}`).join(', '));
+  }
+  return { id, name, repriced };
 }
 
 // ─── Invoices ─────────────────────────────────────────────────────────────────
 
-export async function getInvoices(_uid: number, _password: string, partnerId: number): Promise<Record<string, unknown>[]> {
+/**
+ * `opts.from`/`opts.to` are ISO dates (YYYY-MM-DD) filtering on invoice_date.
+ * The default limit of 50 is fine for the invoice list but silently truncates a
+ * statement, so the statement route passes a higher one.
+ */
+export async function getInvoices(
+  _uid: number,
+  _password: string,
+  partnerId: number,
+  opts: { from?: string; to?: string; limit?: number } = {}
+): Promise<Record<string, unknown>[]> {
   try {
+    const domain: unknown[] = [
+      ['partner_id', '=', partnerId],
+      ['move_type', '=', 'out_invoice'],
+      ['state', '=', 'posted'],
+    ];
+    if (opts.from) domain.push(['invoice_date', '>=', opts.from]);
+    if (opts.to) domain.push(['invoice_date', '<=', opts.to]);
     return (await jsonrpcCallKw('account.move', 'search_read', [
-      [['partner_id', '=', partnerId], ['move_type', '=', 'out_invoice'], ['state', '=', 'posted']],
+      domain,
       ['id', 'name', 'invoice_date', 'invoice_date_due', 'amount_total',
        'amount_residual', 'payment_state', 'state'],
     ], {
       order: 'invoice_date desc',
-      limit: 50,
+      limit: opts.limit ?? 50,
+      context: {},
+    })) as Record<string, unknown>[] ?? [];
+  } catch { return []; }
+}
+
+/**
+ * Posted inbound payments, i.e. money the customer has actually sent us.
+ * Pairing these with getInvoices is what turns the Statement page into a real
+ * ledger rather than a second copy of the invoice list.
+ */
+export async function getCustomerPayments(
+  commercialId: number,
+  opts: { from?: string; to?: string; limit?: number } = {}
+): Promise<Record<string, unknown>[]> {
+  try {
+    const domain: unknown[] = [
+      ['partner_id', 'child_of', commercialId],
+      ['payment_type', '=', 'inbound'],
+      ['state', '=', 'posted'],
+    ];
+    if (opts.from) domain.push(['date', '>=', opts.from]);
+    if (opts.to) domain.push(['date', '<=', opts.to]);
+    return (await jsonrpcCallKw('account.payment', 'search_read', [
+      domain,
+      ['id', 'name', 'date', 'amount', 'ref'],
+    ], {
+      order: 'date desc',
+      limit: opts.limit ?? 400,
       context: {},
     })) as Record<string, unknown>[] ?? [];
   } catch { return []; }
@@ -1409,26 +1776,11 @@ export async function reconcileStripePaymentWithInvoice(
 
 // ─── Pricelist ────────────────────────────────────────────────────────────────
 
-export interface PricelistItem {
-  id: number;
-  compute_price: 'fixed' | 'percentage' | 'formula';
-  price_discount: number;      // for formula/percentage
-  percent_price: number;       // for percentage type (0-100 discount)
-  applied_on: '0_product_variant' | '1_product' | '2_product_category' | '3_global';
-  product_tmpl_id: [number, string] | false;
-  product_id: [number, string] | false;
-  categ_id: [number, string] | false;   // for '2_product_category' rules
-  min_quantity: number;
-  base: string;                // 'list_price', 'standard_price', 'pricelist'
-  price: string;               // display string
-}
-
-export interface PricelistInfo {
-  id: number;
-  name: string;
-  currency: string;
-  items: PricelistItem[];
-}
+// The rule types and the engine itself live in lib/pricelist.ts, which is pure
+// so it can be unit-tested. Re-exported here because this module used to own
+// them and callers import from it.
+export type { PricelistItem, PricelistInfo };
+export { applyPricelist };
 
 export async function getPartnerPricelist(uid: number, _password: string): Promise<PricelistInfo | null> {
   try {
@@ -1451,15 +1803,16 @@ export async function getPartnerPricelist(uid: number, _password: string): Promi
 
     const plId = plEntry[0];
 
-    // Fetch all pricelist items (usually <200 per pricelist)
+    // The order is load-bearing: applyPricelist takes the first matching rule and
+    // trusts this to be Odoo's own precedence. The limit has to clear the largest
+    // list in the database — FT-Partners A.P.S has 747 rules, and the old 500
+    // silently dropped 247 of them.
     const items = await jsonrpcCallKw('product.pricelist.item', 'search_read', [
       [['pricelist_id', '=', plId]],
-      ['compute_price', 'percent_price', 'price_discount', 'applied_on',
-       'product_tmpl_id', 'product_id', 'categ_id', 'min_quantity', 'base', 'price',
-       'date_start', 'date_end'],
+      PRICELIST_ITEM_FIELDS,
     ], {
-      limit: 500,
-      order: 'applied_on asc, min_quantity desc',
+      limit: 2000,
+      order: PRICELIST_ITEM_ORDER,
       context: {},
     }) as PricelistItem[];
 
@@ -1471,87 +1824,6 @@ export async function getPartnerPricelist(uid: number, _password: string): Promi
     };
   } catch {
     return null;
-  }
-}
-
-/**
- * Apply pricelist rules to a product's price.
- * Handles: fixed, percentage discount, formula (cost-based).
- *
- * Rule matching priority (Odoo order): product template > product category > global.
- * (Variant-level rules are skipped — we price at the template level.)
- *
- * `categAncestry` is the product's category chain, leaf-first (the product's own
- * category, then its parent, grandparent, …). A '2_product_category' rule applies
- * to a product whose category is the rule's category OR any descendant of it, so we
- * match when the rule's category id appears anywhere in this chain. When several
- * category rules match, the one nearest the leaf (smallest index) is the most
- * specific and wins.
- */
-export function applyPricelist(
-  pricelist: PricelistInfo,
-  productTmplId: number,
-  listPrice: number,
-  costPrice: number,
-  qty: number = 1,
-  categAncestry: number[] = []
-): number {
-  const items = pricelist.items;
-
-  // Depth of a category rule within the product's ancestry (leaf = 0 = most
-  // specific). Non-category rules return 0; unmatched category rules are filtered out.
-  const categDepth = (item: PricelistItem): number =>
-    item.applied_on === '2_product_category' && item.categ_id
-      ? categAncestry.indexOf(item.categ_id[0])
-      : 0;
-
-  // Priority: template > category > global. Find best matching rule.
-  const candidates = items.filter(item => {
-    if (item.min_quantity > qty) return false;
-    if (item.applied_on === '0_product_variant') return false; // skip variant-level (no variant id)
-    if (item.applied_on === '1_product') return item.product_tmpl_id && item.product_tmpl_id[0] === productTmplId;
-    if (item.applied_on === '2_product_category') return !!item.categ_id && categAncestry.includes(item.categ_id[0]);
-    if (item.applied_on === '3_global') return true;
-    return false;
-  });
-
-  // Sort: more specific applied_on first, then (for category rules) nearest the
-  // leaf category, then higher min-qty first.
-  candidates.sort((a, b) => {
-    const priority = { '1_product': 0, '2_product_category': 1, '3_global': 2 };
-    const pa = priority[a.applied_on as keyof typeof priority] ?? 3;
-    const pb = priority[b.applied_on as keyof typeof priority] ?? 3;
-    if (pa !== pb) return pa - pb;
-    const da = categDepth(a), db = categDepth(b);
-    if (da !== db) return da - db;
-    return b.min_quantity - a.min_quantity;
-  });
-
-  const rule = candidates[0];
-  if (!rule) return listPrice;
-
-  switch (rule.compute_price) {
-    case 'fixed':
-      // Fixed price from the price string e.g. "£ 33.50" — extract number
-      return parseFloat(rule.price.replace(/[^0-9.]/g, '')) || listPrice;
-    case 'percentage':
-      // percent_price is the discount %
-      return listPrice * (1 - (rule.percent_price || 0) / 100);
-    case 'formula': {
-      // price_discount is stored as negative markup (e.g. -25 means +25% on cost)
-      const base = rule.base === 'standard_price' ? costPrice : listPrice;
-      // price_discount: negative = markup (e.g. -25 = cost * 1.25)
-      const discount = rule.price_discount || 0;
-      if (discount < 0) {
-        // It's a markup on cost: cost * (1 + abs(discount)/100)
-        return base * (1 + Math.abs(discount) / 100);
-      } else {
-        // It's a discount on list: list * (1 - discount/100)
-        return base * (1 - discount / 100);
-      }
-    }
-    default:
-      return listPrice;
   }
 }
 
@@ -1578,15 +1850,49 @@ export async function getCategoryAncestries(categIds: number[]): Promise<Map<num
   return map;
 }
 
+const round2 = (n: number) => Math.round(n * 100) / 100;
+
 /**
- * Overlay the logged-in partner's pricelist onto a batch of product cards, in place.
- * Sets each product's `list_price` to the partner's price when a rule matches, and
- * keeps the pre-pricelist value in `original_price` so the UI can strike-through a
- * cheaper deal. Leaves prices untouched when the partner has no pricelist or no rule
- * matches, so existing special prices are never clobbered.
+ * A copy of a cached product that applyPricelistToProducts can safely mutate.
  *
- * This includes category-level rules ('2_product_category'): a product inherits the
- * price of its own category or any ancestor category (most-specific wins).
+ * Product caches are keyed without the partner, so anything the pricelist writes
+ * must land on a copy or the next partner inherits it. A plain spread is not
+ * enough: `variant_ids` is an array of shared objects and per-variant prices are
+ * written into them. Use this everywhere rather than hand-rolling the spread.
+ */
+export function copyForPricing<T extends Record<string, unknown>>(product: T): T {
+  const copy = { ...product };
+  if (Array.isArray(copy.variant_ids)) {
+    (copy as Record<string, unknown>).variant_ids =
+      copy.variant_ids.map(v => (v && typeof v === 'object' ? { ...(v as Record<string, unknown>) } : v));
+  }
+  return copy;
+}
+
+/** The partner's pricelist, cached per uid — it is stable for minutes. */
+export async function getPartnerPricelistCached(uid: number, password = ''): Promise<PricelistInfo | null> {
+  if (!uid || uid <= 0) return null;
+  const plKey = `pricelist:${uid}`;
+  const cached = cacheGet<PricelistInfo | null>(plKey);
+  if (cached) return cached;
+  const pricelist = await getPartnerPricelist(uid, password);
+  cacheSet(plKey, pricelist, TTL.PRODUCTS);
+  return pricelist;
+}
+
+/**
+ * Overlay the logged-in partner's pricelist onto a batch of product cards, IN PLACE.
+ * Sets each product's `list_price` to the partner's price and keeps the pre-pricelist
+ * value in `original_price` so the UI can strike through a cheaper deal.
+ *
+ * Also prices `variant_ids[]` where present. Most of the paint range sells by size,
+ * and a large share of the negotiated rules in Odoo are variant-level
+ * ('0_product_variant') — pricing only the template left those customers on public
+ * prices in the size selector and, through it, in the basket.
+ *
+ * CALLERS MUST PASS A COPY. Product objects come out of a partner-agnostic cache;
+ * mutating a cached object — including anything inside `variant_ids` — leaks one
+ * partner's negotiated prices to every other partner.
  */
 export async function applyPricelistToProducts(
   uid: number,
@@ -1595,13 +1901,7 @@ export async function applyPricelistToProducts(
 ): Promise<void> {
   if (!uid || uid <= 0 || !products.length) return;
 
-  // Pricelist is per-partner and stable for minutes — cache it.
-  const plKey = `pricelist:${uid}`;
-  let pricelist = cacheGet<PricelistInfo | null>(plKey);
-  if (!pricelist) {
-    pricelist = await getPartnerPricelist(uid, password);
-    cacheSet(plKey, pricelist, TTL.PRODUCTS);
-  }
+  const pricelist = await getPartnerPricelistCached(uid, password);
   if (!pricelist || !pricelist.items.length) return;
 
   // Category ancestry for every distinct leaf category in the batch.
@@ -1623,10 +1923,32 @@ export async function applyPricelistToProducts(
     const cat = Array.isArray(p.categ_id) && typeof p.categ_id[0] === 'number' ? p.categ_id[0] : 0;
     const ancestry = cat ? (ancestryByCat.get(cat) || [cat]) : [];
 
-    const priced = applyPricelist(pricelist, tmplId, base, cost, 1, ancestry);
+    const { price, rule } = applyPricelist(pricelist, {
+      tmplId, variantId: null, listPrice: base, costPrice: cost, categAncestry: ancestry,
+    });
     p.original_price = base;
-    // Only override when the pricelist actually produced a different price, so a
-    // no-match (priced === base) preserves any existing special price.
-    p.list_price = priced !== base ? Math.round(priced * 100) / 100 : existing;
+    // Only override when the pricelist actually moved the price. A rule can match
+    // and land straight back on the list price — every tier's winning global rule
+    // is "0 % discount on sales price", which does exactly that — and overriding
+    // then would wipe out a promotional special_price for no reason.
+    p.list_price = rule && price !== base ? round2(price) : existing;
+
+    if (!Array.isArray(p.variant_ids)) continue;
+    for (const raw of p.variant_ids) {
+      const v = raw as Record<string, unknown>;
+      const variantId = typeof v.id === 'number' ? v.id : Number(v.id);
+      if (!variantId) continue;
+      const vExisting = typeof v.price === 'number' ? v.price : 0;
+      const vBase = typeof v.original_price === 'number' ? v.original_price : vExisting;
+      // Falls back to the template's cost: only cost-based formula rules need it,
+      // and getProductById reads per-variant standard_price where it can.
+      const vCost = typeof v.standard_price === 'number' ? v.standard_price : cost;
+
+      const priced = applyPricelist(pricelist, {
+        tmplId, variantId, listPrice: vBase, costPrice: vCost, categAncestry: ancestry,
+      });
+      v.original_price = vBase;
+      v.price = priced.rule && priced.price !== vBase ? round2(priced.price) : vExisting;
+    }
   }
 }

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { getWebSession } from '@/lib/odoo';
+import { getWebSession, resolveAccountPartner, assertOwnsRecord } from '@/lib/odoo';
 
 export async function GET(
   req: NextRequest,
@@ -13,6 +13,14 @@ export async function GET(
   const { id } = await context.params;
   const orderId = parseInt(id);
   if (isNaN(orderId)) return NextResponse.json({ error: 'Invalid ID' }, { status: 400 });
+
+  // Authorize, not just authenticate. Scoped to the commercial partner so a
+  // child contact keeps access to the company's documents. 404 rather than 403
+  // so the response does not confirm somebody else's order exists.
+  const { commercialId } = await resolveAccountPartner(session.user.uid);
+  if (!commercialId || !(await assertOwnsRecord('sale.order', orderId, commercialId))) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
 
   // Opened as a browser tab (top-level navigation): return a tiny HTML shell whose
   // <title> controls the tab title, embedding the PDF full-screen. Chrome ignores the
