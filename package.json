@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
-    "start": "next start"
+    "start": "next start",
+    "test": "node --test lib/*.test.ts"
   },
   "dependencies": {
     "@stripe/stripe-js": "^9.0.0",

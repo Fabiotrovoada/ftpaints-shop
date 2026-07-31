@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { useBasket } from '@/lib/basketStore';
 import { stateBadge } from '@/lib/orderState';
+import { OdooHtml, hasOdooHtmlContent } from '@/lib/odooHtml';
 import type { Order, OrderLine } from '@/types/account';
 
 const money = (n: number) => `£${n.toFixed(2)}`;
@@ -238,10 +239,10 @@ export default function OrderDetailPage({ params }: { params: Promise<{ id: stri
         )}
       </div>
 
-      {typeof order.note === 'string' && order.note.trim() && (
+      {hasOdooHtmlContent(order.note) && (
         <div className="card p-5 mt-5">
           <h2 className="font-semibold text-gray-700 text-sm mb-2">Order notes</h2>
-          <p className="text-sm text-gray-600 whitespace-pre-line">{order.note}</p>
+          <OdooHtml html={order.note} className="text-sm text-gray-600 whitespace-pre-line" />
         </div>
       )}
     </div>

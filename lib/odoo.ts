@@ -301,7 +301,7 @@ export async function assertOwnsRecord(
 // price             →  list_price
 // cost              →  standard_price
 // internal_reference → default_code
-// available_in_stock (bool) → qty_available (number: 999 if true, 0 if false)
+// shipping ("… N Units Available") → qty_available (see stockFromShipping)
 // category_id {id, name, parent_id, parent_name} → categ_id [id, name]
 // image_url (full URL) → image_url (keep as URL; frontend updated to use it)
 // bulk_deal_values [{qty, price}] → quantity_breaks
@@ -349,14 +349,39 @@ interface MobileProduct {
   product_variant_id?: [number, string] | false;
 }
 
+/**
+ * Stock quantity out of the Mobile API's `shipping` blurb.
+ *
+ * The listing's own `available_in_stock` boolean cannot be trusted: it comes back
+ * false for products Odoo genuinely holds stock of — including products the API's
+ * *server-side* in-stock filter itself returned (template 4037 has
+ * qty_available 1 and is in the filtered listing, yet reports false; 14 of a
+ * 100-row filtered sample were like that). Believing it is what put
+ * "Available to Order" cards in the In-stock-only grid.
+ *
+ * `shipping` is the accurate one. It has exactly two shapes across the catalogue —
+ * "Stock: In stock\n540.0 Units Available" and "Stock: Ships in 1-2 Days" — and the
+ * number matched product.template.qty_available on every product cross-checked over
+ * JSON-RPC. No units means no stock.
+ */
+function stockFromShipping(shipping?: string): number | null {
+  if (typeof shipping !== 'string') return null;
+  const m = shipping.match(/([\d.,]+)\s*Units?\s+Available/i);
+  if (!m) return /in stock/i.test(shipping) ? null : 0;
+  const qty = parseFloat(m[1].replace(/,/g, ''));
+  return Number.isFinite(qty) ? qty : null;
+}
+
 function normalizeMobileProduct(p: MobileProduct) {
   const catId = p.category_id?.id && p.category_id.id > 0 ? p.category_id.id : null;
   const catName = p.category_id?.name || '';
-  // qty_available: Mobile API returns boolean available_in_stock
-  // Use a high number (999) when true so UI shows "In Stock"
+  // A numeric available_in_stock is a real quantity the JSON-RPC fallback filled in,
+  // so it wins. Otherwise read `shipping`, and only fall back to the unreliable
+  // boolean (999 = "in stock, count unknown") when there is no blurb to read.
+  const shippingQty = stockFromShipping(p.shipping);
   const qty = typeof p.available_in_stock === 'number'
     ? p.available_in_stock
-    : (p.available_in_stock ? 999 : 0);
+    : shippingQty ?? (p.available_in_stock ? 999 : 0);
 
   return {
     id: p.id,
@@ -1853,6 +1878,66 @@ export async function getCategoryAncestries(categIds: number[]): Promise<Map<num
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 /**
+ * Which price to show once the pricelist has spoken.
+ *
+ * `base` is the regular price, `existing` the one currently on the product; they
+ * differ only while a promotional special_price is running. A rule that lands
+ * straight back on `base` has changed nothing, so leave `existing` alone.
+ *
+ * Where a rule does move the price, a promotion still has to survive it. Before
+ * cost bands the winning rule was almost always "0 % discount on sales price",
+ * which returned `base`, so this case was rare; now every tier lands on its own
+ * band price and overriding unconditionally would cancel every promotion for
+ * everyone except the tier the catalogue happened to be fetched as. The customer
+ * gets whichever is cheaper.
+ */
+function settlePrice(priced: number, base: number, existing: number, rule: PricelistItem | null): number {
+  if (!rule || priced === base) return existing;
+  const next = round2(priced);
+  const onPromotion = existing > 0 && existing < base;
+  return onPromotion ? Math.min(next, existing) : next;
+}
+
+/**
+ * Cost per product.template id, cached.
+ *
+ * The Mobile API exposes a `cost` field but it is 0 for every product in the
+ * catalogue, so `normalizeMobileProduct` cannot fill `standard_price` from it.
+ * Cost now decides which tier band a product falls into, so it has to be right —
+ * a missing cost would read as £0 and land every product in the zero-cost
+ * fallback, selling the whole catalogue at list price.
+ */
+async function getTemplateCosts(tmplIds: number[]): Promise<Map<number, number>> {
+  const costs = new Map<number, number>();
+  const missing: number[] = [];
+  for (const id of new Set(tmplIds)) {
+    if (!id || id <= 0) continue;
+    const hit = cacheGet<number>(`cost:${id}`);
+    // Cache 0 as a real answer — 207 sellable products genuinely have no cost,
+    // and refetching them on every render would be a permanent latency tax.
+    if (typeof hit === 'number') costs.set(id, hit); else missing.push(id);
+  }
+  if (missing.length) {
+    try {
+      const rows = await jsonrpcCallKw('product.template', 'search_read', [
+        [['id', 'in', missing]], ['id', 'standard_price'],
+      ], { context: {} }) as Array<{ id: number; standard_price?: number }> | null;
+      for (const row of rows || []) {
+        const cost = typeof row.standard_price === 'number' ? row.standard_price : 0;
+        costs.set(row.id, cost);
+        cacheSet(`cost:${row.id}`, cost, TTL.PRODUCTS);
+      }
+    } catch (e) {
+      // Better to leave costs unknown and skip the overlay than to price a whole
+      // grid from a phantom £0 cost.
+      console.error('[pricelist] cost fetch failed, tier pricing skipped for this batch:',
+        e instanceof Error ? e.message : e);
+    }
+  }
+  return costs;
+}
+
+/**
  * A copy of a cached product that applyPricelistToProducts can safely mutate.
  *
  * Product caches are keyed without the partner, so anything the pricelist writes
@@ -1911,6 +1996,13 @@ export async function applyPricelistToProducts(
     if (Array.isArray(c) && typeof c[0] === 'number') leafCatIds.push(c[0]);
   }
   const ancestryByCat = await getCategoryAncestries(leafCatIds);
+  // Cost decides the tier band, and the Mobile API never supplies it, so read it
+  // for anything that arrived without one.
+  const costByTmpl = await getTemplateCosts(
+    products
+      .filter(p => !(typeof p.standard_price === 'number' && p.standard_price > 0))
+      .map(p => (typeof p.id === 'number' ? p.id : Number(p.id)))
+  );
 
   for (const p of products) {
     const tmplId = typeof p.id === 'number' ? p.id : Number(p.id);
@@ -1919,19 +2011,36 @@ export async function applyPricelistToProducts(
     // Base = the true list price (pre special/pricelist). Mobile keeps the regular
     // price in original_price; JSON-RPC paths only carry list_price.
     const base = typeof p.original_price === 'number' ? p.original_price : existing;
-    const cost = typeof p.standard_price === 'number' ? p.standard_price : 0;
+    const cost = typeof p.standard_price === 'number' && p.standard_price > 0
+      ? p.standard_price
+      : costByTmpl.get(tmplId) ?? 0;
+    // Keep it on the product: the basket and the order builder both need the same
+    // cost to land on the same band.
+    p.standard_price = cost;
     const cat = Array.isArray(p.categ_id) && typeof p.categ_id[0] === 'number' ? p.categ_id[0] : 0;
     const ancestry = cat ? (ancestryByCat.get(cat) || [cat]) : [];
 
+    // A single-variant template IS its variant as far as pricing goes, and saying
+    // so is the only way a `0_product_variant` rule can match — those are how
+    // negotiated prices are stored (138 of FT-Partners NEW's 141 rules, 689 of
+    // A.P.S's 747). Passing null here priced grid cards at the public base while
+    // the detail page, which walks variant_ids[] separately, showed the real
+    // negotiated price.
+    //
+    // Multi-variant templates stay null on purpose: there is no single price to
+    // show, and ProductCard sends the customer to pick a size instead.
+    const soleVariantId =
+      typeof p.variant_id === 'number' && p.variant_id > 0
+        ? p.variant_id
+        : Array.isArray(p.variant_ids) && p.variant_ids.length === 1
+          ? Number((p.variant_ids[0] as Record<string, unknown>)?.id) || null
+          : null;
+
     const { price, rule } = applyPricelist(pricelist, {
-      tmplId, variantId: null, listPrice: base, costPrice: cost, categAncestry: ancestry,
+      tmplId, variantId: soleVariantId, listPrice: base, costPrice: cost, categAncestry: ancestry,
     });
     p.original_price = base;
-    // Only override when the pricelist actually moved the price. A rule can match
-    // and land straight back on the list price — every tier's winning global rule
-    // is "0 % discount on sales price", which does exactly that — and overriding
-    // then would wipe out a promotional special_price for no reason.
-    p.list_price = rule && price !== base ? round2(price) : existing;
+    p.list_price = settlePrice(price, base, existing, rule);
 
     if (!Array.isArray(p.variant_ids)) continue;
     for (const raw of p.variant_ids) {
@@ -1948,7 +2057,7 @@ export async function applyPricelistToProducts(
         tmplId, variantId, listPrice: vBase, costPrice: vCost, categAncestry: ancestry,
       });
       v.original_price = vBase;
-      v.price = priced.rule && priced.price !== vBase ? round2(priced.price) : vExisting;
+      v.price = settlePrice(priced.price, vBase, vExisting, priced.rule);
     }
   }
 }

@@ -1,83 +1,105 @@
-# Odoo pricelist findings — things to fix in Odoo, not in code
+# Odoo pricing findings — things to decide or fix in Odoo, not in code
 
-Captured from the live database (Odoo 18.0+e) on 31 July 2026, while fixing the portal's
-pricelist engine. The portal now reproduces Odoo's pricing exactly, which means **everything below
-changes what customers pay the moment it is changed in Odoo**. None of it can or should be worked
-around in the portal.
+Captured from the live database (Odoo 18.0+e) on 31 July 2026 while fixing the portal's pricing.
 
-## 1. The Bronze / Silver / Gold tiers are currently no-ops
+> **This supersedes an earlier version of this document that said the Bronze/Silver/Gold tiers were
+> no-ops and recommended deleting rules 6810/6811/6812. That was wrong — see §1. Those rules must be
+> kept.**
 
-Odoo evaluates pricelist rules in the order `applied_on, min_quantity desc, categ_id desc, id desc`
-and applies the **first** one that matches. Each tier has seven competing global rules, and because
-the `0 % discount on sales price` rule is the newest on each list, it always wins — the cost-markup
-rules beneath it are never reached.
+## 1. Pricing runs on a custom engine, and all three channels share it
 
-**Net effect today: for any product without its own rule, Bronze, Silver and Gold all pay the plain
-public list price.** The three tiers are indistinguishable except where a product- or variant-level
-rule exists (Bronze has none at all).
+`ft_paints_pricelist` (TechUltra Solutions, v18.0.0.0.4) adds `min_cost` and `max_cost` to
+`product.pricelist.item`, plus a non-stored `compute_price` field on `product.template`, and
+**patches Odoo's core pricing engine**. The website, the mobile app and the trade portal therefore
+all resolve a price the same way:
 
-| Pricelist | Rule id | Rule | Reached? |
+1. **A negotiated fixed rule** — on the variant first, then the template. Never cost-band gated.
+2. Otherwise **the tier's cost-band ladder**, chosen by the product's cost.
+3. Otherwise the plain sales price.
+
+A stock Odoo, evaluating `applied_on, min_quantity desc, categ_id desc, id desc` and taking the first
+match, would stop at each tier's `0 % discount on sales price` rule and always return the sales
+price. That is *not* what happens here — the cost bands are what decide.
+
+The tier rules are **cost-band markup ladders**:
+
+| Product cost | Bronze 🥉 | Silver 🥈 | Gold 🥇 |
 |---|---|---|---|
-| **Bronze Partner 🥉** (id 1) | 6812 | 0 % discount on sales price | **wins** |
-| | 1237 | 35 % markup on product cost | never |
-| | 1236 | 45 % markup on product cost | never |
-| | 1235 | 55 % markup on product cost | never |
-| | 1234 | 90 % markup on product cost | never |
-| | 1233 | 135 % markup on product cost | never |
-| | 1232 | 200 % markup on product cost | never |
-| **Silver Partner 🥈** (id 4) | 6811 | 0 % discount on sales price | **wins** |
-| | 6809 | 25 % markup on product cost | never |
-| | 6808 | 35 % markup on product cost | never |
-| | 6807 | 50 % markup on product cost | never |
-| | 6806 | 75 % markup on product cost | never |
-| | 6805 | 100 % markup on product cost | never |
-| | 6804 | 150 % markup on product cost | never |
-| **Gold Partner 🥇** (id 5) | 6810 | 0 % discount on sales price | **wins** |
-| | 1249 | 120 % markup on product cost | never |
-| | 1247 | 20 % markup on product cost | never |
-| | 1246 | 25 % markup on product cost | never |
-| | 1245 | 30 % markup on product cost | never |
-| | 1244 | 55 % markup on product cost | never |
-| | 1243 | 75 % markup on product cost | never |
+| £0.03 – 3 | 200 % | 150 % | 120 % |
+| £3.01 – 10 | 135 % | 100 % | 75 % |
+| £10.01 – 25 | 90 % | 75 % | 55 % |
+| £25.01 – 60 | 55 % | 50 % | 30 % |
+| £60 – 150 | 45 % | 35 % | 25 % |
+| £150 + | 35 % | 25 % | 20 % |
 
-Note the six markup rules per tier cannot all apply anyway — they are all global with no minimum
-quantity, so even without the `0 %` rule only one of them would ever be used. They look like the
-remains of an intended per-category structure.
+Example — **3.5L B89 Octobase System Deep Black**, cost £80.61, sales price £79.74:
+Silver's £60–150 band gives `80.61 × 1.35 = £108.82`. Standard Odoo would say £79.74.
 
-**If the tiers are supposed to differ**, either delete rules 6810/6811/6812 and give each tier a
-single markup rule, or scope the markups to product categories (`Apply On = Product Category`) so
-they stop competing with each other. Whatever you choose, the portal will follow automatically.
+### The `0 %` rules are the zero-cost fallback — do not delete them
 
-### Who this affects
+Rules **6812** (Bronze), **6811** (Silver) and **6810** (Gold) carry `min_cost = max_cost = 0`, so
+they match only a product whose cost is £0. That is what stops the 207 sellable zero-cost products
+from pricing at £0.00 through a cost-based rule. Deleting them would break those products.
 
-66 portal logins, by assigned pricelist:
+### Confirmed against the live site
+
+Fetching `get_combination_info` from www.ftpaints.co.uk anonymously (website default pricelist is
+Silver) returns the band price on every product checked — B89 at **£108.82**, Silver's 35 % band, not
+its £79.74 sales price. The portal's engine reproduces the website exactly on 5/5 products and the
+Mobile API on 500/500.
+
+229 real `sale.order.line` records from Bronze/Silver/Gold customers, costed products only:
+
+| `price_unit` matches | share |
+|---|---|
+| **cost-band price** | **67 %** |
+| the plain sales price | **1 %** |
+| neither — manual override or negotiated | 32 % |
+
+### Who is on which list
+
+66 portal logins:
 
 | Pricelist | Users |
 |---|---|
-| Bronze Partner 🥉 | 54 |
+| Bronze Partner 🥉 | 55 |
 | Silver Partner 🥈 | 3 |
 | Gold Partner 🥇 | 3 |
-| FT-Partners ✨ NEW | 3 |
+| FT-Partners ✨ NEW | 2 |
 | Per-customer lists | 3 |
 
-## 2. Product data that breaks cost-based rules
+## 2. `compute_price` disagrees with its own Mobile API on one product
+
+For B89 (template 13372):
+
+- `product.template.compute_price` → **£100.7625** (cost × 1.25 — the £150+ band)
+- `/api/v1/product_template/13372` → **£108.8235** (cost × 1.35 — the correct £60–150 band)
+
+Reproducible across repeated reads as the same user. Every other product sampled agreed exactly.
+B89 is also the only sampled product whose **cost (£80.61) exceeds its sales price (£79.74)**, which
+suggests a band-boundary comparison being made against different fields in the two code paths.
+
+The portal uses the Mobile API value, which is the correct one. Worth reporting to TechUltra anyway.
+
+## 3. Product data that distorts cost-based pricing
+
+Because every tier price is derived from **cost**, cost errors are price errors.
 
 | Problem | Count |
 |---|---|
-| Sellable templates with `standard_price` (cost) = 0 | 207 |
-| Sellable templates with `list_price` ≤ 0 | 182 |
-| Sellable templates with a **negative** `list_price` | 1 |
-
-A cost-based rule against a zero-cost product computes to **£0.00**. Odoo has no guard against this;
-the portal now refuses to show a £0.00 price and falls back to the list price, logging a warning. So
-these products are safe in the portal but would still price at £0 in Odoo itself if a cost-based rule
-were ever reached.
+| Sellable products with `standard_price` (cost) = 0 | 207 |
+| Sellable products with `list_price` ≤ 0 | 182 |
+| Sellable products with a **negative** `list_price` | 1 |
 
 The negative one is worth correcting regardless:
 
-- **Caslek MS Lacquer** (template id 128935) — list price **£-3.33**
+- **Caslek MS Lacquer** (template 128935) — sales price **−£3.33**
 
-## 3. One pricelist was over the portal's old fetch limit
+A product whose cost exceeds its sales price (B89 is one: £80.61 vs £79.74) is not necessarily wrong,
+but it does mean the band price lands well above the shelf price. Worth reviewing the cost data if
+that is unexpected.
+
+## 4. FT-Partners ✨ A.P.S is a very large list
 
 | Pricelist | Rules |
 |---|---|
@@ -88,17 +110,20 @@ The negative one is worth correcting regardless:
 | Price List for WIZARD OF BODS | 162 |
 | FT-Partners ✨ | 159 |
 
-The portal used to read at most 500 rules per list, silently dropping 247 of A.P.S's. No portal login
-is on that list today, so nothing was mispriced by it. The limit is now 2000 — worth remembering if a
-list ever grows past that.
+The portal used to read at most 500 rules per list, silently dropping 247 of A.P.S's. The limit is
+now 2000. No portal login is on that list today, but worth remembering if one ever grows past 2000.
 
-## 4. Product template / variant id collisions
+Negotiated fixed prices are **not** cost-band gated — 2,052 product/variant fixed rules exist, 1,857
+of them on products that do have a cost, and none carries a band. 87 real order lines were billed at
+exactly their fixed price. The portal follows that behaviour.
 
-Not a pricing issue, but it came out of the same work and is worth knowing about.
+## 5. Product template / variant id collisions
+
+Not a pricing issue, but it came out of the same work.
 
 `sale.order.line.product_id` must be a `product.product` (a variant). The portal's product cards used
 to put the `product.template` id in the basket instead. The two id sequences overlap: **14,904 of
-32,704 sellable template ids (45.6%) also exist as a valid variant id**, usually belonging to an
+32,704 sellable template ids (45.6 %) also exist as a valid variant id**, usually belonging to an
 unrelated product. For example basket id `85062` means "ISOPON METALIK NO.2 KIT 1.1L" as a template
 but "ECLIPSE - 2K CLEAR (1LT)" as a variant.
 

@@ -37,6 +37,13 @@ export interface PricelistItem {
   base: 'list_price' | 'standard_price' | 'pricelist' | string;
   base_pricelist_id: [number, string] | false;
   min_quantity: number;
+  /**
+   * Cost band, added by the custom `ft_paints_pricelist` module — NOT standard
+   * Odoo. See COST BANDS below. `0`/`0` means the rule only applies to a product
+   * with no cost at all.
+   */
+  min_cost: number;
+  max_cost: number;
   date_start: string | false;
   date_end: string | false;
   /** Odoo's human-readable summary ("35 % markup on product cost"). Logging only. */
@@ -70,7 +77,8 @@ export const PRICELIST_ITEM_FIELDS = [
   'id', 'compute_price', 'fixed_price', 'percent_price', 'price_discount',
   'price_surcharge', 'price_round', 'price_min_margin', 'price_max_margin',
   'applied_on', 'product_tmpl_id', 'product_id', 'categ_id',
-  'base', 'base_pricelist_id', 'min_quantity', 'date_start', 'date_end', 'price',
+  'base', 'base_pricelist_id', 'min_quantity', 'min_cost', 'max_cost',
+  'date_start', 'date_end', 'price',
 ];
 
 export interface PriceContext {
@@ -104,9 +112,42 @@ function withinDates(item: PricelistItem, date: Date): boolean {
   return true;
 }
 
+/**
+ * COST BANDS — the part that is not Odoo.
+ *
+ * `ft_paints_pricelist` gates each tier's global rules on the product's cost, so
+ * Bronze/Silver/Gold are markup *ladders* (Silver: 150 % under £3, …, 25 % over
+ * £150) rather than the competing rules a stock Odoo would see.
+ *
+ * The module patches Odoo's core pricing engine, so this is not a portal quirk —
+ * www.ftpaints.co.uk, the mobile app and this code all resolve the same price.
+ * Verified against the live site: B89 (cost £80.61) returns £108.82 anonymously,
+ * which is Silver's 35 % band, Silver being the website's default pricelist.
+ * The portal has to replicate the algorithm only because Odoo refuses to run it
+ * for us — `_compute_price_rule` and friends are private and blocked over RPC.
+ *
+ * The gate applies to `3_global` rules only. Product- and variant-level rules are
+ * negotiated prices and always apply: 1,857 of them sit on products that do have
+ * a cost, not one carries a band, and 87 real order lines were billed at exactly
+ * their fixed price. Their `0`/`0` is an unset default, not a band.
+ *
+ * A global rule with `0`/`0` therefore matches only a product with no cost at
+ * all. That is deliberate: it is how each tier's `0 % discount on sales price`
+ * rule (6810/6811/6812) works as the zero-cost fallback for the 207 products
+ * with no cost, which otherwise would price at £0. Do not delete those rules.
+ */
+function withinCostBand(item: PricelistItem, cost: number): boolean {
+  if (item.applied_on !== '3_global') return true;
+  return cost >= item.min_cost && cost <= item.max_cost;
+}
+
 /** Odoo's `_is_applicable_for`, minus the UoM conversion the portal never uses. */
-function isApplicable(item: PricelistItem, ctx: Required<Pick<PriceContext, 'tmplId' | 'qty' | 'categAncestry'>> & { variantId: number | null }): boolean {
+function isApplicable(
+  item: PricelistItem,
+  ctx: Required<Pick<PriceContext, 'tmplId' | 'qty' | 'categAncestry'>> & { variantId: number | null; costPrice: number }
+): boolean {
   if (ctx.qty < item.min_quantity) return false;
+  if (!withinCostBand(item, ctx.costPrice)) return false;
   switch (item.applied_on) {
     case '0_product_variant':
       return !!ctx.variantId && id0(item.product_id) === ctx.variantId;
@@ -140,6 +181,9 @@ export function findPricelistRule(pricelist: PricelistInfo, ctx: PriceContext): 
     variantId: ctx.variantId ?? null,
     qty: ctx.qty ?? 1,
     categAncestry: ctx.categAncestry ?? [],
+    // Drives the cost band, so a missing cost must not silently read as "£0 and
+    // therefore in the zero-cost band" — callers have to supply the real cost.
+    costPrice: ctx.costPrice ?? 0,
   };
   // First match wins — items arrive in PRICELIST_ITEM_ORDER. Do not sort here.
   for (const item of pricelist.items) {
