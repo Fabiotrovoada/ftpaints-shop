@@ -8,6 +8,7 @@ import Footer from '@/components/Footer';
 import { useBasket } from '@/lib/basketStore';
 import { useFavourites } from '@/lib/favourites';
 import { useRecentlyViewed } from '@/lib/recentlyViewed';
+import { isUnlimitedStock } from '@/lib/stock';
 
 interface VariantOption {
   id: number;
@@ -15,6 +16,7 @@ interface VariantOption {
   merged_name: string;
   price: number;
   internal_reference?: string;
+  qty_available?: number;
   attribute_values?: Array<{ name: string; display_name: string; attribute_id: number }>;
 }
 
@@ -133,6 +135,9 @@ export default function ProductDetailPage() {
       price: currentPrice,
       qty,
       image: product.image_url || product.image_128,
+      // Without this the basket has no stock to go on and shows no status line
+      // at all — ProductCard has always passed it.
+      qtyAvailable: selectedVariant?.qty_available ?? product.qty_available,
       colours: isCustomMixed
         ? colourSpecs.map(s => ({
             name: s.name.trim() || undefined,
@@ -238,9 +243,12 @@ export default function ProductDetailPage() {
             {/* Stock */}
             <div className="flex items-center gap-3">
               <span className={`badge-stock ${product.qty_available > 0 ? 'badge-instock' : 'badge-available'}`}>
-                {product.qty_available > 0
-                  ? `✓ In Stock (${Math.floor(product.qty_available)} units)`
-                  : 'Available to Order'}
+                {/* Made-in-house products have no meaningful count to quote. */}
+                {isUnlimitedStock(product.qty_available)
+                  ? '✓ In Stock'
+                  : product.qty_available > 0
+                    ? `✓ In Stock (${Math.floor(product.qty_available)} units)`
+                    : 'Available to Order'}
               </span>
               {product.barcode && (
                 <span className="text-xs text-gray-400 font-mono">Barcode: {product.barcode}</span>
@@ -466,7 +474,9 @@ export default function ProductDetailPage() {
                   ['Category', product.categ_id ? (product.categ_id as [number,string])[1] : '—'],
                   ['Unit of Measure', product.uom_id ? (product.uom_id as [number,string])[1] : '—'],
                   ['Barcode', product.barcode || '—'],
-                  ['Stock Available', product.qty_available > 0 ? `${Math.floor(product.qty_available)} units` : 'Available to order'],
+                  ['Stock Available', isUnlimitedStock(product.qty_available)
+                    ? 'In stock'
+                    : product.qty_available > 0 ? `${Math.floor(product.qty_available)} units` : 'Available to order'],
                 ].map(([label, value]) => (
                   <div key={label} className="flex justify-between py-2 border-b border-gray-50 last:border-0">
                     <span className="text-gray-500">{label}</span>

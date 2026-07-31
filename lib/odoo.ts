@@ -15,6 +15,7 @@ const ODOO_DB = process.env.ODOO_DB!;
 import * as https from 'https';
 import * as http from 'http';
 import { cacheGet, cacheSet, TTL } from './cache';
+import { ALWAYS_IN_STOCK_CATEGORY_ID, UNLIMITED_QTY } from './stock';
 import {
   applyPricelist,
   PRICELIST_ITEM_FIELDS,
@@ -452,6 +453,65 @@ function toProductCard(p: MobileProduct): Record<string, unknown> {
   };
 }
 
+// ─── Made-in-house stock override ─────────────────────────────────────────────
+
+/**
+ * Product templates sitting directly in the made-in-house website category.
+ *
+ * Resolved over JSON-RPC rather than from a card's `categ_id`, which is not
+ * comparable across paths: normalizeMobileProduct fills it from the Mobile
+ * API's single `category_id` (one arbitrary website category of possibly
+ * several), while toProductCard fills it from the internal product.category.
+ * `public_categ_ids` is the field the website tree actually uses.
+ *
+ * Ids only, cached for TTL.ALWAYS_IN_STOCK — membership changes about as often
+ * as the category tree itself.
+ */
+async function getAlwaysInStockIds(): Promise<Set<number>> {
+  const key = `always-in-stock:${ALWAYS_IN_STOCK_CATEGORY_ID}`;
+  const cached = cacheGet<number[]>(key);
+  if (cached) return new Set(cached);
+  try {
+    const ids = (await jsonrpcCallKw('product.template', 'search', [
+      [['public_categ_ids', 'in', [ALWAYS_IN_STOCK_CATEGORY_ID]]],
+    ])) as number[];
+    const list = Array.isArray(ids) ? ids : [];
+    cacheSet(key, list, TTL.ALWAYS_IN_STOCK);
+    return new Set(list);
+  } catch (err) {
+    // Degrade to real Odoo stock rather than failing the whole grid.
+    console.error('[odoo] always-in-stock lookup failed:', err instanceof Error ? err.message : err);
+    return new Set<number>();
+  }
+}
+
+/**
+ * Stamp "never runs out" onto every card that belongs to the made-in-house
+ * category. Applied inside the fetch functions so the override is what lands in
+ * the API-route caches, and so every consumer of qty_available — card badge,
+ * detail page, basket messaging, the checkout card gate — inherits it without
+ * knowing this category exists.
+ */
+async function applyAlwaysInStock(products: Record<string, unknown>[]): Promise<void> {
+  if (!products.length) return;
+  const unlimited = await getAlwaysInStockIds();
+  if (!unlimited.size) return;
+  for (const p of products) {
+    if (typeof p.id !== 'number' || !unlimited.has(p.id)) continue;
+    p.qty_available = UNLIMITED_QTY;
+    p.virtual_available = UNLIMITED_QTY;
+    // getProductById reads real per-variant stock, which would otherwise
+    // contradict the template on the size selector.
+    if (Array.isArray(p.variant_ids)) {
+      p.variant_ids = (p.variant_ids as Record<string, unknown>[]).map(v => ({
+        ...v,
+        qty_available: UNLIMITED_QTY,
+        virtual_available: UNLIMITED_QTY,
+      }));
+    }
+  }
+}
+
 // ─── Products (Mobile API) ────────────────────────────────────────────────────
 
 /**
@@ -475,7 +535,13 @@ async function getProductsViaRpc(
       ['default_code', 'ilike', options.search],
       ['barcode', 'ilike', options.search]);
   }
-  if (options.inStockOnly) domain.push(['qty_available', '>', 0]);
+  // Made-in-house products are always available, whatever Odoo holds on hand,
+  // so an in-stock filter must not drop them.
+  if (options.inStockOnly) {
+    domain.push('|',
+      ['qty_available', '>', 0],
+      ['public_categ_ids', 'in', [ALWAYS_IN_STOCK_CATEGORY_ID]]);
+  }
 
   const total = (await jsonrpcCallKw('product.template', 'search_count', [domain])) as number;
   const rows = (await jsonrpcCallKw('product.template', 'search_read', [
@@ -576,12 +642,19 @@ export async function getProducts(
   const limit = options.limit || 25;
   const offset = options.offset || 0;
 
+  // The Mobile API applies its in-stock filter inside Odoo, on the real on-hand
+  // quantity, so made-in-house products would be filtered out before we ever see
+  // them. Browsing that category, everything is in stock by definition — drop the
+  // flag rather than send one we can't correct. (The JSON-RPC paths widen their
+  // domain instead; see getProductsViaRpc.)
+  const inStockOnly = options.inStockOnly && options.categoryId !== ALWAYS_IN_STOCK_CATEGORY_ID;
+
   // Fetch a single Mobile-API page (1-indexed) for the current filters.
   async function fetchMobilePage(pageNum: number): Promise<{ rows: MobileProduct[]; total: number }> {
     if (options.search) {
       const result = (await mobileGet(`/api/v1/search/${pageNum}`, admin, {
         search_term: options.search,
-        ...(options.inStockOnly ? { show_in_stock_only: true } : {}),
+        ...(inStockOnly ? { show_in_stock_only: true } : {}),
       })) as { products?: MobileProduct[]; itemCount?: number };
       const rows = result?.products || [];
       return { rows, total: result?.itemCount ?? rows.length };
@@ -590,7 +663,7 @@ export async function getProducts(
     if (options.categoryId) filterBy.categ_id = options.categoryId;
     const result = (await mobileGet(`/api/v1/all_product_template/${pageNum}`, admin, {
       filter_by: filterBy,
-      ...(options.inStockOnly ? { available_in_stock: true } : {}),
+      ...(inStockOnly ? { available_in_stock: true } : {}),
     })) as { product_templates?: MobileProduct[]; itemCount?: number };
     const rows = result?.product_templates || [];
     return { rows, total: result?.itemCount ?? rows.length };
@@ -643,6 +716,7 @@ export async function getProducts(
   }
   const products = result.products;
   const total = result.total;
+  await applyAlwaysInStock(products);
 
   // Sort client-side since Mobile API doesn't support sorting
   if (options.sort) {
@@ -820,6 +894,8 @@ export async function getProductById(_uid: number, _password: string, id: number
     }
   }
 
+  await applyAlwaysInStock([normalized as unknown as Record<string, unknown>]);
+
   return normalized;
 }
 
@@ -900,7 +976,10 @@ export async function getProductsByTag(
     domain.push(['name', 'ilike', search]);
   }
   if (inStockOnly) {
-    domain.push(['qty_available', '>', 0]);
+    // See getProductsViaRpc — the made-in-house category is always available.
+    domain.push('|',
+      ['qty_available', '>', 0],
+      ['public_categ_ids', 'in', [ALWAYS_IN_STOCK_CATEGORY_ID]]);
   }
 
   // Parse sort
@@ -928,6 +1007,7 @@ export async function getProductsByTag(
   }) as MobileProduct[];
 
   const products = rawProducts.map(toProductCard);
+  await applyAlwaysInStock(products);
 
   return { products, total };
 }
@@ -950,6 +1030,7 @@ export async function getProductsByIds(ids: number[]): Promise<{ products: Recor
 
     // Preserve the caller's id order (search_read ignores it)
     const products = ids.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
+    await applyAlwaysInStock(products);
     return { products, total: products.length };
   } catch {
     return { products: [], total: 0 };
@@ -1173,6 +1254,7 @@ export async function getPreviouslyPurchasedProducts(
     }
 
     const products = tmplIds.map(id => byId.get(id)).filter(Boolean) as Record<string, unknown>[];
+    await applyAlwaysInStock(products);
     return { products };
   } catch { return { products: [] }; }
 }

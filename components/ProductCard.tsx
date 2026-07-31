@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useBasket } from '@/lib/basketStore';
 import { useFavourites } from '@/lib/favourites';
+import { isUnlimitedStock } from '@/lib/stock';
 
 interface SellerInfo {
   price: number;
@@ -77,8 +78,12 @@ export default function ProductCard({
   const { toggle, isFavourite } = useFavourites();
 
   const inStock = product.qty_available > 0;
-  // qty_available of 999 = "in stock, exact count unknown" from Mobile API
-  const exactQty = product.qty_available < 999 ? product.qty_available : null;
+  // Only show a number when it is a real count. 999 = "in stock, exact count
+  // unknown" from the Mobile API; made-in-house products carry their own,
+  // much larger sentinel. Both render as a plain "✓ In Stock".
+  const exactQty = isUnlimitedStock(product.qty_available) || product.qty_available >= 999
+    ? null
+    : product.qty_available;
   const lowStock = inStock && exactQty !== null && exactQty <= 5;
   const isFav = isFavourite(product.id);
   // Two reasons a card cannot add straight to the basket:

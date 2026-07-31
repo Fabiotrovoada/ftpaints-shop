@@ -35,6 +35,7 @@ export const TTL = {
   PRODUCTS: 300,      // 5 min — product list
   PRODUCT: 600,       // 10 min — single product
   CATEGORIES: 3600,   // 1 hour — categories/brands rarely change
+  ALWAYS_IN_STOCK: 3600, // 1 hour — which products sit in the made-in-house category
   ORDERS: 60,         // 1 min — orders
   INVOICES: 120,      // 2 min — invoices
   BUY_AGAIN: 300,     // 5 min — purchase history (several Odoo round-trips)
