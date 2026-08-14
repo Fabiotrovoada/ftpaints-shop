@@ -152,26 +152,26 @@ function ShopPageInner() {
     window.history.replaceState(null, '', id ? `/shop?categoryId=${id}` : '/shop');
   }, []);
 
-  // Load categories once
+  // Load categories once. /shop sits behind next-auth middleware, so the session
+  // cookie is already valid by the time this component mounts — waiting on the
+  // client-side useSession() hook here only added a redundant round trip before
+  // this could even start.
   useEffect(() => {
-    if (!session) return;
     fetch('/api/categories')
       .then(r => r.json())
       .then(d => setCategories(Array.isArray(d.categories) ? d.categories : []))
       .catch(() => setCategories([]));
-  }, [session]);
+  }, []);
 
   // Load tags once
   useEffect(() => {
-    if (!session) return;
     fetch('/api/tags')
       .then(r => r.json())
       .then(d => { if (Array.isArray(d.tags)) setTags(d.tags); })
       .catch(() => {});
-  }, [session]);
+  }, []);
 
   const loadProducts = useCallback(async () => {
-    if (!session) return;
     setLoading(true);
     try {
       // Map UI sort values to Odoo field names
@@ -221,7 +221,7 @@ function ShopPageInner() {
     } finally {
       setLoading(false);
     }
-  }, [session, search, inStockOnly, categoryId, selectedTag, collection, page, sort, favIds]);
+  }, [search, inStockOnly, categoryId, selectedTag, collection, page, sort, favIds]);
 
   useEffect(() => { loadProducts(); }, [loadProducts, selectedTag, sort]);
 

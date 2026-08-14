@@ -24,6 +24,13 @@ import {
   type PricelistItem,
 } from './pricelist';
 
+// Every Mobile API call (auth, search, listing, and — worst case — one per product
+// on the price fan-out below) went through here with no Agent, so each one paid a
+// fresh TCP+TLS handshake to Odoo instead of reusing a pooled connection. keepAlive
+// agents let concurrent/sequential requests to the same Odoo host share sockets.
+const keepAliveHttpsAgent = new https.Agent({ keepAlive: true, maxSockets: 32, rejectUnauthorized: false });
+const keepAliveHttpAgent = new http.Agent({ keepAlive: true, maxSockets: 32 });
+
 function httpsGetWithBody(urlStr: string, body: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const parsed = new URL(urlStr);
@@ -39,6 +46,7 @@ function httpsGetWithBody(urlStr: string, body: string): Promise<string> {
         'Content-Length': Buffer.byteLength(body),
       },
       rejectUnauthorized: false,
+      agent: isHttps ? keepAliveHttpsAgent : keepAliveHttpAgent,
     };
     const req = transport.request(options, (res) => {
       let data = '';
