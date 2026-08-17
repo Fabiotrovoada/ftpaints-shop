@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { jsonrpcCallKw, reconcileStripePaymentWithInvoice, postInvoiceIfDraft } from '@/lib/odoo';
+import { jsonrpcCallKw, reconcileStripePaymentWithInvoice, postInvoiceIfDraft, confirmSaleOrderIfDraft } from '@/lib/odoo';
 
 export async function POST(req: NextRequest) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -46,10 +46,14 @@ async function processPI(pi: Stripe.PaymentIntent) {
   }
 
   if (odooInvoiceId) {
-    await reconcileKnownInvoice(customerEmail, amount, pi.id, saleReference, odooInvoiceId);
-  } else {
-    await reconcile(customerEmail, amount, pi.id, saleReference);
+    // checkout.session.completed also fires for this same payment and carries
+    // identical metadata — let it own the confirm/post/reconcile sequence so
+    // the two events can't race each other over the same order and invoice.
+    console.log(`[WEBHOOK] PI ${pi.id} belongs to a known checkout order — leaving it to checkout.session.completed`);
+    return;
   }
+
+  await reconcile(customerEmail, amount, pi.id, saleReference);
 }
 
 async function processSession(session: Stripe.Checkout.Session) {
@@ -70,21 +74,24 @@ async function processSession(session: Stripe.Checkout.Session) {
 
   const paymentId = stripePaymentId || `cs_${session.id}`;
   const odooInvoiceId = metadata.odoo_invoice_id ? Number(metadata.odoo_invoice_id) : undefined;
+  const odooOrderId = metadata.odoo_order_id ? Number(metadata.odoo_order_id) : undefined;
 
   if (odooInvoiceId) {
-    await reconcileKnownInvoice(customerEmail, amount, paymentId, saleReference, odooInvoiceId);
+    await reconcileKnownInvoice(customerEmail, amount, paymentId, saleReference, odooInvoiceId, odooOrderId);
   } else {
     await reconcile(customerEmail, amount, paymentId, saleReference);
   }
 }
 
 /**
- * Card orders placed at checkout already have a draft invoice created for
- * them (see /api/payment/create-session) — its id travels in Stripe metadata
- * so the webhook doesn't have to guess which invoice this payment is for.
+ * Card orders placed at checkout already have a draft invoice — and a draft
+ * sale order — created for them (see /api/payment/create-session); the ids
+ * travel in Stripe metadata so the webhook doesn't have to guess which
+ * invoice/order this payment is for.
  */
 async function reconcileKnownInvoice(
-  customerEmail: string, amount: number, stripePaymentId: string, saleReference: string, invoiceId: number
+  customerEmail: string, amount: number, stripePaymentId: string, saleReference: string,
+  invoiceId: number, orderId?: number
 ) {
   const partners = (await jsonrpcCallKw('res.partner', 'search_read', [
     [['email', '=', customerEmail]],
@@ -99,6 +106,9 @@ async function reconcileKnownInvoice(
   const partnerId = partners[0].id;
   const partnerName = partners[0].name;
 
+  // Confirm the quotation into a Sales Order first — same order Odoo's own
+  // checkout does it in — then post the invoice that's already linked to it.
+  if (orderId) await confirmSaleOrderIfDraft(orderId);
   await postInvoiceIfDraft(invoiceId);
 
   await reconcileStripePaymentWithInvoice(

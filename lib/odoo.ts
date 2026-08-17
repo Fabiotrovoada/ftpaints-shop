@@ -1597,6 +1597,14 @@ export interface OdooInvoiceLine {
   quantity: number;
   price_unit: number;
   tax_ids?: number[];
+  /**
+   * The sale.order.line(s) this invoice line bills. Odoo's own "Create
+   * Invoice" button sets this same field — populating it here is what makes
+   * the sale order's own invoice_status / invoice smart button reflect this
+   * invoice, without having to call Odoo's private _create_invoices method
+   * (blocked over the API — only public methods are callable externally).
+   */
+  sale_line_ids?: number[];
 }
 
 export interface OdooPaymentResult {
@@ -1637,16 +1645,8 @@ export async function findOrCreateOdooPartner(
   return partnerId;
 }
 
-/**
- * Create and post a customer invoice in Odoo.
- */
-export async function createOdooInvoice(
-  partnerId: number,
-  lines: OdooInvoiceLine[],
-  reference?: string
-): Promise<number> {
-  // Build invoice line values — each line needs its own [0, 0, {...}] command tuple
-  const lineVals = lines.map(line => {
+function buildInvoiceLineVals(lines: OdooInvoiceLine[]): Record<string, unknown>[] {
+  return lines.map(line => {
     const vals: Record<string, unknown> = {
       name: line.name,
       quantity: line.quantity,
@@ -1659,16 +1659,27 @@ export async function createOdooInvoice(
       // Odoo expects tax_ids as [[6, 0, [tax_ids]]]
       vals.tax_ids = [[6, false, line.tax_ids]];
     }
+    if (line.sale_line_ids?.length) {
+      vals.sale_line_ids = [[6, false, line.sale_line_ids]];
+    }
     return vals;
   });
+}
 
-  // Create invoice (move_type: out_invoice = customer invoice)
+/**
+ * Create and post a customer invoice in Odoo.
+ */
+export async function createOdooInvoice(
+  partnerId: number,
+  lines: OdooInvoiceLine[],
+  reference?: string
+): Promise<number> {
   // Each line needs its own create command: [0, 0, {vals}], [0, 1, {vals}], etc.
   const invoiceId = await jsonrpcCallKw('account.move', 'create', [{
     move_type: 'out_invoice',
     partner_id: partnerId,
     ref: reference || `Stripe Payment`,
-    invoice_line_ids: lineVals.map((vals, i) => [0, i, vals]),
+    invoice_line_ids: buildInvoiceLineVals(lines).map((vals, i) => [0, i, vals]),
   }]) as number;
 
   // Post the invoice
@@ -1687,26 +1698,11 @@ export async function createOdooDraftInvoice(
   lines: OdooInvoiceLine[],
   reference?: string
 ): Promise<number> {
-  const lineVals = lines.map(line => {
-    const vals: Record<string, unknown> = {
-      name: line.name,
-      quantity: line.quantity,
-      price_unit: line.price_unit,
-    };
-    if (line.product_id) {
-      vals.product_id = line.product_id;
-    }
-    if (line.tax_ids?.length) {
-      vals.tax_ids = [[6, false, line.tax_ids]];
-    }
-    return vals;
-  });
-
   const invoiceId = await jsonrpcCallKw('account.move', 'create', [{
     move_type: 'out_invoice',
     partner_id: partnerId,
     ref: reference || `Stripe Payment`,
-    invoice_line_ids: lineVals.map((vals, i) => [0, i, vals]),
+    invoice_line_ids: buildInvoiceLineVals(lines).map((vals, i) => [0, i, vals]),
   }]) as number;
 
   console.log(`[ODOO] Created DRAFT invoice ${invoiceId} for partner ${partnerId}`);
@@ -1718,12 +1714,29 @@ export async function createOdooDraftInvoice(
  * No-op if it's already posted (webhook events can arrive more than once).
  */
 export async function postInvoiceIfDraft(invoiceId: number): Promise<void> {
-  const rows = (await jsonrpcCallKw('account.move', 'read', [[invoiceId]], {
+  // A single-id read() returns the record directly, not wrapped in an array.
+  const row = (await jsonrpcCallKw('account.move', 'read', [[invoiceId]], {
     fields: ['state'],
-  })) as Array<{ id: number; state: string }>;
-  if (rows[0]?.state === 'draft') {
+  })) as { id: number; state: string } | null;
+  if (row?.state === 'draft') {
     await jsonrpcCallKw('account.move', 'action_post', [[invoiceId]]);
     console.log(`[ODOO] Posted invoice ${invoiceId}`);
+  }
+}
+
+/**
+ * Confirm a quotation into a Sales Order once its payment succeeds — same
+ * state transition Odoo's own website checkout performs on payment success.
+ * No-op if it's already past the quotation stage (webhook events can repeat).
+ */
+export async function confirmSaleOrderIfDraft(orderId: number): Promise<void> {
+  // A single-id read() returns the record directly, not wrapped in an array.
+  const row = (await jsonrpcCallKw('sale.order', 'read', [[orderId]], {
+    fields: ['state'],
+  })) as { id: number; state: string } | null;
+  if (row?.state === 'draft' || row?.state === 'sent') {
+    await jsonrpcCallKw('sale.order', 'action_confirm', [[orderId]]);
+    console.log(`[ODOO] Confirmed sale order ${orderId}`);
   }
 }
 

@@ -19,6 +19,7 @@ interface OrderLine {
 }
 
 interface SaleOrderLine {
+  id: number;
   product_id?: [number, string] | false;
   product_uom_qty: number;
   price_unit: number;
@@ -113,6 +114,11 @@ export async function POST(req: NextRequest) {
         name: l.name,
         quantity: l.product_uom_qty,
         price_unit: l.price_unit,
+        // Links this invoice line back to its sale.order.line, the same way
+        // Odoo's own "Create Invoice" button does — needed for the order's
+        // invoice_status / invoice smart button to reflect this invoice once
+        // the order is confirmed on payment success.
+        sale_line_ids: [l.id],
       }));
       if (delivery > 0) {
         invoiceLines.push({ name: 'Delivery', quantity: 1, price_unit: delivery });
