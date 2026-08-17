@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useBasket, type BasketItem } from '@/lib/basketStore';
+import { DELIVERY_PRICING } from '@/lib/delivery';
 
 // Resolve the per-unit colour list for a line, falling back to the legacy
 // single-colour fields for baskets persisted before the per-unit change.
@@ -25,8 +26,7 @@ const DELIVERY_METHODS = [
     id: 'van',
     name: 'FTPaints Van Delivery',
     description: 'Our own driver — next available run in your area',
-    price: 0,
-    freeOver: null,
+    ...DELIVERY_PRICING.van,
     icon: '🚐',
     badge: 'Free',
   },
@@ -34,8 +34,7 @@ const DELIVERY_METHODS = [
     id: 'standard',
     name: 'Standard Courier',
     description: '3-5 working days via courier',
-    price: 0,
-    freeOver: 50,
+    ...DELIVERY_PRICING.standard,
     icon: '📦',
     badge: null,
   },
@@ -43,8 +42,7 @@ const DELIVERY_METHODS = [
     id: 'next_day',
     name: 'Next Working Day',
     description: 'Order before 2pm for next day courier',
-    price: 9.95,
-    freeOver: null,
+    ...DELIVERY_PRICING.next_day,
     icon: '⚡',
     badge: 'Popular',
   },
@@ -52,8 +50,7 @@ const DELIVERY_METHODS = [
     id: 'express',
     name: 'Express AM Delivery',
     description: 'Delivered before 12pm next day',
-    price: 14.95,
-    freeOver: null,
+    ...DELIVERY_PRICING.express,
     icon: '🚀',
     badge: null,
   },
@@ -61,8 +58,7 @@ const DELIVERY_METHODS = [
     id: 'collection',
     name: 'Click & Collect',
     description: 'Collect from FTPaints — free of charge',
-    price: 0,
-    freeOver: null,
+    ...DELIVERY_PRICING.collection,
     icon: '🏪',
     badge: 'Free',
   },
@@ -183,6 +179,19 @@ export default function CheckoutPage() {
   const slots = getDeliverySlots(deliveryMethod);
   const needsSlot = ['next_day', 'express', 'collection'].includes(deliveryMethod);
 
+  function buildOrderNote() {
+    return [
+      note,
+      deliveryMethod !== 'collection' ? `Delivery: ${selectedMethod.name}` : `Click & Collect [C&C Agreement signed by ${session?.user?.email} on ${new Date().toLocaleDateString('en-GB')}]`,
+      deliverySlot ? `Collection slot: ${deliverySlot.label} ${deliverySlot.time}` : '',
+      deliveryAddress.line1 ? `Delivery address: ${Object.values(deliveryAddress).filter(Boolean).join(', ')}` : '',
+      paymentMethod === 'collection' ? 'Payment: Pay on Collection at trade counter' :
+      paymentMethod === 'account' ? `Payment: Invoice — ${paymentTermName || 'account terms'}` :
+      paymentMethod === 'bank' ? 'Payment: Bank Transfer (BACS)' :
+      paymentMethod === 'card' ? 'Payment: Card (Stripe)' : '',
+    ].filter(Boolean).join(' | ');
+  }
+
   async function placeOrder() {
     setPlacing(true);
     try {
@@ -191,16 +200,7 @@ export default function CheckoutPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colours: i.colours, colourName: i.colourName, colourCode: i.colourCode })),
-          note: [
-            note,
-            deliveryMethod !== 'collection' ? `Delivery: ${selectedMethod.name}` : `Click & Collect [C&C Agreement signed by ${session?.user?.email} on ${new Date().toLocaleDateString('en-GB')}]`,
-            deliverySlot ? `Collection slot: ${deliverySlot.label} ${deliverySlot.time}` : '',
-            deliveryAddress.line1 ? `Delivery address: ${Object.values(deliveryAddress).filter(Boolean).join(', ')}` : '',
-            paymentMethod === 'collection' ? 'Payment: Pay on Collection at trade counter' :
-            paymentMethod === 'account' ? `Payment: Invoice — ${paymentTermName || 'account terms'}` :
-            paymentMethod === 'bank' ? 'Payment: Bank Transfer (BACS)' :
-            paymentMethod === 'card' ? 'Payment: Card (Stripe)' : '',
-          ].filter(Boolean).join(' | '),
+          note: buildOrderNote(),
         }),
       });
       const data = await res.json();
@@ -774,16 +774,20 @@ export default function CheckoutPage() {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
-                          amount: totalIncVat,
                           description: 'FTPaints Order',
                           customerEmail: session?.user?.email,
                           reference: `ORD-${Date.now()}`,
+                          note: buildOrderNote(),
+                          deliveryMethod,
                           lines: items.map(item => ({
                             product_id: item.id,
                             code: item.code,
                             name: item.name,
                             qty: item.qty,
                             price: item.price,
+                            colours: item.colours,
+                            colourName: item.colourName,
+                            colourCode: item.colourCode,
                           })),
                         }),
                       });

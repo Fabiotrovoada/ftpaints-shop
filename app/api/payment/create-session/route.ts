@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
+import {
+  createSaleOrder, getSaleOrderLines, getPartnerByUid, createOdooDraftInvoice,
+  OrderLineError, type OrderLineInput, type OdooInvoiceLine,
+} from '@/lib/odoo';
+import { deliveryCost } from '@/lib/delivery';
 
 interface OrderLine {
   product_id?: number;
@@ -8,13 +13,26 @@ interface OrderLine {
   name: string;
   qty: number;
   price: number;
+  colours?: Array<{ name?: string; code?: string; make?: string; model?: string; year?: string }>;
+  colourName?: string;
+  colourCode?: string;
 }
+
+interface SaleOrderLine {
+  product_id?: [number, string] | false;
+  product_uom_qty: number;
+  price_unit: number;
+  price_subtotal: number;
+  name: string;
+}
+
+const VAT_RATE = 1.2;
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { amount, description, customerEmail, lines, reference } = await req.json();
+  const { amount, description, customerEmail, lines, reference, note, deliveryMethod } = await req.json();
 
   if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.includes('YOUR_KEY')) {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 503 });
@@ -25,55 +43,126 @@ export async function POST(req: NextRequest) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, { apiVersion: '2026-03-25.dahlia' as any });
 
-    const lineItems = lines?.length
-      ? lines.map((line: OrderLine) => ({
+    let lineItems;
+    let orderReference = reference || `ORD-${Date.now()}`;
+    let orderMeta = '';
+    let odooInvoiceId: number | undefined;
+    let odooOrderId: number | undefined;
+
+    if (lines?.length) {
+      // New order paid by card at checkout. The sale order and a draft invoice
+      // are created here, up front, so there is something in Odoo for the
+      // webhook to post and reconcile once Stripe confirms the payment — card
+      // orders used to skip Odoo entirely, which is why paid orders never
+      // showed up there. Prices, delivery and VAT are all computed server-side
+      // so the Stripe charge and the Odoo invoice total always match exactly.
+      const uid = session.user.uid;
+      const clean: OrderLineInput[] = [];
+      for (const l of lines as OrderLine[]) {
+        const productId = Number(l?.product_id);
+        const qty = Number(l?.qty);
+        if (!Number.isInteger(productId) || productId <= 0) {
+          return NextResponse.json({ error: 'That basket contains an item we do not recognise' }, { status: 400 });
+        }
+        if (!Number.isFinite(qty) || qty <= 0) {
+          return NextResponse.json({ error: 'Every item needs a quantity of at least 1' }, { status: 400 });
+        }
+        clean.push({
+          productId, qty, name: l.name, price: l.price,
+          colours: l.colours, colourName: l.colourName, colourCode: l.colourCode,
+        });
+      }
+
+      const user = await getPartnerByUid(uid, '');
+      const partnerId = (user?.partner_id as [number, string])?.[0];
+      if (!partnerId) return NextResponse.json({ error: 'Partner not found' }, { status: 400 });
+
+      const order = await createSaleOrder(uid, '', partnerId, clean, note || description);
+      odooOrderId = order.id;
+      orderReference = order.name || orderReference;
+
+      const orderLines = (await getSaleOrderLines(uid, '', order.id)) as SaleOrderLine[];
+      if (!orderLines.length) {
+        throw new Error(`Order ${orderReference} was created but its lines could not be read back`);
+      }
+
+      const subtotal = orderLines.reduce((s, l) => s + l.price_unit * l.product_uom_qty, 0);
+      const delivery = deliveryCost(deliveryMethod || 'standard', subtotal);
+
+      lineItems = orderLines.map(l => ({
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: l.name.split('\n')[0].substring(0, 250) },
+          unit_amount: Math.round(l.price_unit * VAT_RATE * 100),
+        },
+        quantity: l.product_uom_qty,
+      }));
+      if (delivery > 0) {
+        lineItems.push({
           price_data: {
             currency: 'gbp',
-            product_data: {
-              name: line.name,
-              description: line.code ? `SKU: ${line.code}` : undefined,
-            },
-            unit_amount: Math.round(line.price * 100),
-          },
-          quantity: line.qty,
-        }))
-      : [{
-          price_data: {
-            currency: 'gbp',
-            product_data: { name: description || 'FTPaints Order' },
-            unit_amount: Math.round(amount * 100),
+            product_data: { name: 'Delivery' },
+            unit_amount: Math.round(delivery * VAT_RATE * 100),
           },
           quantity: 1,
-        }];
+        });
+      }
 
-    const orderMeta = lines
-      ? JSON.stringify(lines.map((l: OrderLine) => ({
-          id: l.product_id,
-          c: l.code,
-          n: l.name.substring(0, 50),
-          q: l.qty,
-          p: l.price,
-        }))).substring(0, 400)
-      : '';
+      const invoiceLines: OdooInvoiceLine[] = orderLines.map(l => ({
+        product_id: Array.isArray(l.product_id) ? l.product_id[0] : undefined,
+        name: l.name,
+        quantity: l.product_uom_qty,
+        price_unit: l.price_unit,
+      }));
+      if (delivery > 0) {
+        invoiceLines.push({ name: 'Delivery', quantity: 1, price_unit: delivery });
+      }
+
+      odooInvoiceId = await createOdooDraftInvoice(partnerId, invoiceLines, orderReference);
+
+      orderMeta = JSON.stringify(orderLines.map(l => ({
+        n: l.name.split('\n')[0].substring(0, 50),
+        q: l.product_uom_qty,
+        p: l.price_unit,
+      }))).substring(0, 400);
+    } else {
+      lineItems = [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: description || 'FTPaints Order' },
+          unit_amount: Math.round(amount * 100),
+        },
+        quantity: 1,
+      }];
+    }
+
+    const metadata: Record<string, string> = {
+      customer_email: session.user.email || customerEmail || '',
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      customer_name: (session.user as any)?.name || '',
+      order_reference: orderReference,
+      order_lines: orderMeta,
+      amount_total: String(amount ?? ''),
+    };
+    if (odooInvoiceId) metadata.odoo_invoice_id = String(odooInvoiceId);
+    if (odooOrderId) metadata.odoo_order_id = String(odooOrderId);
 
     const checkoutSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],
       mode: 'payment',
       customer_email: customerEmail || session.user.email || undefined,
       line_items: lineItems,
-      metadata: {
-        customer_email: session.user.email || customerEmail || '',
-        customer_name: (session.user as any)?.name || '',
-        order_reference: reference || `ORD-${Date.now()}`,
-        order_lines: orderMeta,
-        amount_total: String(amount),
-      },
+      metadata,
+      payment_intent_data: { metadata },
       success_url: `${process.env.NEXTAUTH_URL}/account?payment=success`,
       cancel_url:  `${process.env.NEXTAUTH_URL}/account?payment=cancelled`,
     });
 
     return NextResponse.json({ url: checkoutSession.url });
   } catch (err: unknown) {
+    if (err instanceof OrderLineError) {
+      return NextResponse.json({ error: err.message, items: err.items }, { status: 400 });
+    }
     console.error('Stripe error:', err);
     const message = err instanceof Error ? err.message : 'Payment session failed';
     return NextResponse.json({ error: message }, { status: 500 });

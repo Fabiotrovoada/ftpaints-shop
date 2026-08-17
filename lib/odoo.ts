@@ -1713,16 +1713,18 @@ export async function createOdooDraftInvoice(
   return invoiceId;
 }
 
-// In-memory map: checkout session id → draft invoice id
-// Used by webhook to find the right invoice to post + reconcile
-const _checkoutInvoiceMap = new Map<string, number>();
-
-export function registerDraftInvoice(sessionId: string, invoiceId: number) {
-  _checkoutInvoiceMap.set(sessionId, invoiceId);
-}
-
-export function getDraftInvoice(sessionId: string): number | undefined {
-  return _checkoutInvoiceMap.get(sessionId);
+/**
+ * Post a draft invoice created at checkout, once Stripe confirms the payment.
+ * No-op if it's already posted (webhook events can arrive more than once).
+ */
+export async function postInvoiceIfDraft(invoiceId: number): Promise<void> {
+  const rows = (await jsonrpcCallKw('account.move', 'read', [[invoiceId]], {
+    fields: ['state'],
+  })) as Array<{ id: number; state: string }>;
+  if (rows[0]?.state === 'draft') {
+    await jsonrpcCallKw('account.move', 'action_post', [[invoiceId]]);
+    console.log(`[ODOO] Posted invoice ${invoiceId}`);
+  }
 }
 
 /**

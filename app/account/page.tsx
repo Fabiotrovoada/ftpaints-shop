@@ -4,6 +4,7 @@ import { useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import type { Order, Invoice, CreditInfo } from '@/types/account';
+import { useBasket } from '@/lib/basketStore';
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 const ukDate = (iso: string) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '—');
@@ -20,6 +21,7 @@ function AccountPageInner() {
   const { data: session } = useSession();
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { clearBasket } = useBasket();
   const [orders, setOrders] = useState<Order[]>([]);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [credit, setCredit] = useState<CreditInfo | null>(null);
@@ -29,8 +31,15 @@ function AccountPageInner() {
   const goToPay = (invoice?: string) => router.push(invoice ? `/account/pay?invoice=${invoice}` : '/account/pay');
 
   useEffect(() => {
-    if (searchParams?.get('payment') === 'success') setPaySuccess(true);
+    if (searchParams?.get('payment') === 'success') {
+      setPaySuccess(true);
+      // Card checkout redirects here straight from Stripe — this is the only
+      // place left to clear the basket for that flow, since placeOrder()'s
+      // clearBasket() call never runs when the customer pays by card.
+      clearBasket();
+    }
     if (searchParams?.get('payment') === 'cancelled') setPayCancelled(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
   useEffect(() => {

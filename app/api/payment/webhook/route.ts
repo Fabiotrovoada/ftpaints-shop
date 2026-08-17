@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import Stripe from 'stripe';
-import { jsonrpcCallKw, reconcileStripePaymentWithInvoice } from '@/lib/odoo';
+import { jsonrpcCallKw, reconcileStripePaymentWithInvoice, postInvoiceIfDraft } from '@/lib/odoo';
 
 export async function POST(req: NextRequest) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -36,6 +36,7 @@ async function processPI(pi: Stripe.PaymentIntent) {
   const customerEmail = pi.metadata?.customer_email || undefined;
   const saleReference = pi.metadata?.order_reference || pi.id;
   const amount = pi.amount / 100;
+  const odooInvoiceId = pi.metadata?.odoo_invoice_id ? Number(pi.metadata.odoo_invoice_id) : undefined;
 
   console.log(`[WEBHOOK] Processing PI ${pi.id}, amount ${amount}, email ${customerEmail}`);
 
@@ -44,12 +45,17 @@ async function processPI(pi: Stripe.PaymentIntent) {
     return;
   }
 
-  await reconcile(customerEmail, amount, pi.id, saleReference);
+  if (odooInvoiceId) {
+    await reconcileKnownInvoice(customerEmail, amount, pi.id, saleReference, odooInvoiceId);
+  } else {
+    await reconcile(customerEmail, amount, pi.id, saleReference);
+  }
 }
 
 async function processSession(session: Stripe.Checkout.Session) {
   const customerEmail = session.customer_email || undefined;
-  const saleReference = (session.metadata as Record<string, string>)?.order_reference || session.id;
+  const metadata = (session.metadata || {}) as Record<string, string>;
+  const saleReference = metadata.order_reference || session.id;
   const amount = (session.amount_total || 0) / 100;
   const stripePaymentId = typeof session.payment_intent === 'string'
     ? session.payment_intent
@@ -63,7 +69,43 @@ async function processSession(session: Stripe.Checkout.Session) {
   }
 
   const paymentId = stripePaymentId || `cs_${session.id}`;
-  await reconcile(customerEmail, amount, paymentId, saleReference);
+  const odooInvoiceId = metadata.odoo_invoice_id ? Number(metadata.odoo_invoice_id) : undefined;
+
+  if (odooInvoiceId) {
+    await reconcileKnownInvoice(customerEmail, amount, paymentId, saleReference, odooInvoiceId);
+  } else {
+    await reconcile(customerEmail, amount, paymentId, saleReference);
+  }
+}
+
+/**
+ * Card orders placed at checkout already have a draft invoice created for
+ * them (see /api/payment/create-session) — its id travels in Stripe metadata
+ * so the webhook doesn't have to guess which invoice this payment is for.
+ */
+async function reconcileKnownInvoice(
+  customerEmail: string, amount: number, stripePaymentId: string, saleReference: string, invoiceId: number
+) {
+  const partners = (await jsonrpcCallKw('res.partner', 'search_read', [
+    [['email', '=', customerEmail]],
+    ['id', 'name'],
+  ], { limit: 1 })) as Array<{ id: number; name: string }>;
+
+  if (!partners.length) {
+    console.log(`[WEBHOOK] No partner found for email ${customerEmail}, skipping`);
+    return;
+  }
+
+  const partnerId = partners[0].id;
+  const partnerName = partners[0].name;
+
+  await postInvoiceIfDraft(invoiceId);
+
+  await reconcileStripePaymentWithInvoice(
+    invoiceId, partnerId, amount, stripePaymentId, saleReference, partnerName
+  );
+
+  console.log(`[WEBHOOK] ✅ Reconciled invoice ${invoiceId} (order ${saleReference}) with payment ${stripePaymentId}`);
 }
 
 async function reconcile(customerEmail: string, amount: number, stripePaymentId: string, saleReference: string) {
