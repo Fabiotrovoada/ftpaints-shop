@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextRequest, NextResponse, after } from 'next/server';
 import Stripe from 'stripe';
 import { jsonrpcCallKw, reconcileStripePaymentWithInvoice, postInvoiceIfDraft, confirmSaleOrderIfDraft } from '@/lib/odoo';
 
@@ -22,11 +22,14 @@ export async function POST(req: NextRequest) {
   if (event.type === 'payment_intent.succeeded') {
     const pi = event.data.object as Stripe.PaymentIntent;
     console.log(`[WEBHOOK] PaymentIntent succeeded: ${pi.id}, amount: ${pi.amount}`);
-    processPI(pi).catch(err => console.error('[WEBHOOK] Odoo error:', err));
+    // Vercel can freeze the function the instant the response below is sent,
+    // killing any un-awaited async work mid-flight — after() keeps the
+    // invocation alive (via waitUntil) until this promise settles.
+    after(() => processPI(pi).catch(err => console.error('[WEBHOOK] Odoo error:', err)));
   } else if (event.type === 'checkout.session.completed') {
     const session = event.data.object as Stripe.Checkout.Session;
     console.log(`[WEBHOOK] Checkout session completed: ${session.id}, amount: ${session.amount_total}`);
-    processSession(session).catch(err => console.error('[WEBHOOK] Odoo error:', err));
+    after(() => processSession(session).catch(err => console.error('[WEBHOOK] Odoo error:', err)));
   }
 
   return NextResponse.json({ received: true });
