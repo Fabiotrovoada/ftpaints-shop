@@ -2,17 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import {
-  createSaleOrder, confirmSaleOrderIfDraft, getSaleOrderLines, createOdooInvoice,
-  getPartnerByUid, OrderLineError, type OrderLineInput, type OdooInvoiceLine,
+  createSaleOrder, confirmSaleOrderIfDraft, getPartnerByUid, OrderLineError, type OrderLineInput,
 } from '@/lib/odoo';
-
-interface SaleOrderLine {
-  id: number;
-  product_id?: [number, string] | false;
-  product_uom_qty: number;
-  price_unit: number;
-  name: string;
-}
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -54,22 +45,6 @@ export async function POST(req: NextRequest) {
     // funds actually arrived, per its own checkout copy.
     if (paymentMethod === 'account' || paymentMethod === 'collection') {
       await confirmSaleOrderIfDraft(order.id);
-
-      // Raise the invoice immediately (unpaid) so the order shows up on
-      // /account/invoices and /account/statement straight away — trade
-      // customers pay within agreed terms, they don't need to wait for
-      // despatch to see what they owe.
-      const orderLines = (await getSaleOrderLines(uid, password, order.id)) as SaleOrderLine[];
-      const invoiceLines: OdooInvoiceLine[] = orderLines.map(l => ({
-        product_id: Array.isArray(l.product_id) ? l.product_id[0] : undefined,
-        name: l.name,
-        quantity: l.product_uom_qty,
-        price_unit: l.price_unit,
-        sale_line_ids: [l.id],
-      }));
-      if (invoiceLines.length) {
-        await createOdooInvoice(partnerId, invoiceLines, order.name);
-      }
     }
 
     // `repriced` lets checkout tell the customer their basket total moved rather
