@@ -19,44 +19,24 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Bad signature' }, { status: 400 });
   }
 
-  if (event.type === 'payment_intent.succeeded') {
-    const pi = event.data.object as Stripe.PaymentIntent;
-    console.log(`[WEBHOOK] PaymentIntent succeeded: ${pi.id}, amount: ${pi.amount}`);
+  // Every payment in this app is created via stripe.checkout.sessions.create,
+  // so payment_intent.succeeded always has a matching checkout.session.completed
+  // for the same charge. Acting on both raced the two events against each
+  // other — both searching for "is there already a payment for this?" before
+  // either had finished creating one — which is what produced duplicate
+  // account.payment records in Odoo. checkout.session.completed alone is
+  // Stripe's own recommended event for Checkout, so payment_intent.succeeded
+  // is intentionally ignored here.
+  if (event.type === 'checkout.session.completed') {
+    const session = event.data.object as Stripe.Checkout.Session;
+    console.log(`[WEBHOOK] Checkout session completed: ${session.id}, amount: ${session.amount_total}`);
     // Vercel can freeze the function the instant the response below is sent,
     // killing any un-awaited async work mid-flight — after() keeps the
     // invocation alive (via waitUntil) until this promise settles.
-    after(() => processPI(pi).catch(err => console.error('[WEBHOOK] Odoo error:', err)));
-  } else if (event.type === 'checkout.session.completed') {
-    const session = event.data.object as Stripe.Checkout.Session;
-    console.log(`[WEBHOOK] Checkout session completed: ${session.id}, amount: ${session.amount_total}`);
     after(() => processSession(session).catch(err => console.error('[WEBHOOK] Odoo error:', err)));
   }
 
   return NextResponse.json({ received: true });
-}
-
-async function processPI(pi: Stripe.PaymentIntent) {
-  const customerEmail = pi.metadata?.customer_email || undefined;
-  const saleReference = pi.metadata?.order_reference || pi.id;
-  const amount = pi.amount / 100;
-  const odooInvoiceId = pi.metadata?.odoo_invoice_id ? Number(pi.metadata.odoo_invoice_id) : undefined;
-
-  console.log(`[WEBHOOK] Processing PI ${pi.id}, amount ${amount}, email ${customerEmail}`);
-
-  if (!customerEmail) {
-    console.log('[WEBHOOK] No customer email in metadata, skipping');
-    return;
-  }
-
-  if (odooInvoiceId) {
-    // checkout.session.completed also fires for this same payment and carries
-    // identical metadata — let it own the confirm/post/reconcile sequence so
-    // the two events can't race each other over the same order and invoice.
-    console.log(`[WEBHOOK] PI ${pi.id} belongs to a known checkout order — leaving it to checkout.session.completed`);
-    return;
-  }
-
-  await reconcile(customerEmail, amount, pi.id, saleReference);
 }
 
 async function processSession(session: Stripe.Checkout.Session) {

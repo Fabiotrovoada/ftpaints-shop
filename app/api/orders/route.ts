@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
-import { createSaleOrder, getPartnerByUid, OrderLineError, type OrderLineInput } from '@/lib/odoo';
+import { createSaleOrder, confirmSaleOrderIfDraft, getPartnerByUid, OrderLineError, type OrderLineInput } from '@/lib/odoo';
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { lines, note } = await req.json();
+  const { lines, note, paymentMethod } = await req.json();
   const uid = session.user.uid;
   const password = '';
 
@@ -35,6 +35,16 @@ export async function POST(req: NextRequest) {
     if (!partnerId) return NextResponse.json({ error: 'Partner not found' }, { status: 400 });
 
     const order = await createSaleOrder(uid, password, partnerId, clean, note);
+
+    // "Pay on Account" and "Pay on Collection" are firm commitments — the
+    // customer has agreed to pay (on terms, or at the counter), so the order
+    // should land in Odoo as a confirmed Sales Order, not sit invisibly in
+    // Quotations. Bank Transfer stays a Quotation until staff confirm the
+    // funds actually arrived, per its own checkout copy.
+    if (paymentMethod === 'account' || paymentMethod === 'collection') {
+      await confirmSaleOrderIfDraft(order.id);
+    }
+
     // `repriced` lets checkout tell the customer their basket total moved rather
     // than quietly booking a different figure — baskets sit in localStorage for
     // weeks, so a stale price is the normal case, not the exception.

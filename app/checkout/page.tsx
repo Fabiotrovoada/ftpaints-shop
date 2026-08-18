@@ -201,6 +201,7 @@ export default function CheckoutPage() {
         body: JSON.stringify({
           lines: items.map(i => ({ productId: i.id, qty: i.qty, price: i.price, name: i.name, colours: i.colours, colourName: i.colourName, colourCode: i.colourCode })),
           note: buildOrderNote(),
+          paymentMethod,
         }),
       });
       const data = await res.json();
