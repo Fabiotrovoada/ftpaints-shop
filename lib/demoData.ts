@@ -62,6 +62,15 @@ export const DEMO_CREDIT = {
   paymentTermName: '30 Days End of Month',
 };
 
+// Store credit (credit notes from refunds/returns) demo
+export const DEMO_CREDIT_NOTES = [
+  { id: 6001, name: 'RINV/2026/00007', invoice_date: '2026-03-18', amount_total: 45.00, amount_residual: 45.00 },
+];
+export const DEMO_STORE_CREDIT = {
+  available: DEMO_CREDIT_NOTES.reduce((s, c) => s + c.amount_residual, 0),
+  creditNotes: DEMO_CREDIT_NOTES,
+};
+
 export const DEMO_PROFILE = {
   name: 'Liam Rixon',
   email: 'demo@ftpaints.co.uk',

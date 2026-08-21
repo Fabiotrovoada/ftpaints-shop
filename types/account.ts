@@ -86,3 +86,18 @@ export interface CreditInfo {
   paymentTerms?: boolean;
   paymentTermName?: string | null;
 }
+
+/** A posted credit note (refund/return) — not to be confused with CreditInfo,
+ *  which is the trade credit limit. */
+export interface CreditNote {
+  id: number;
+  name: string;
+  invoice_date: string;
+  amount_total: number;
+  amount_residual: number;
+}
+
+export interface StoreCreditInfo {
+  available: number;
+  creditNotes: CreditNote[];
+}

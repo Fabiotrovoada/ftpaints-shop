@@ -172,6 +172,7 @@ function AccountPageInner() {
         </div>
       )}
 
+
       {/* Overdue banner */}
       {totalOverdue > 0 && (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6 flex items-center justify-between gap-3 flex-wrap">

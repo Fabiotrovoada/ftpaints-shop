@@ -29,7 +29,7 @@ export default function Footer() {
                 {/* TODO: replace with real phone number */}
                 <a href="tel:+44 24 7509 7860" className="hover:text-white transition-colors">Tel: +44 24 7509 7860</a>
               </li>
-              <li className="text-gray-400 text-xs pt-1">Mon–Fri 8am–5:30pm · Sat 8am–2pm</li>
+              <li className="text-gray-400 text-xs pt-1">Mon–Fri: 8am–5:30pm<br />Sat: 8am–2pm</li>
             </ul>
           </div>
 
@@ -57,10 +57,10 @@ export default function Footer() {
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wider text-[#c8a951] mb-3">Information</h3>
             <ul className="space-y-2 text-sm text-gray-300">
-              <li><Link href="https://www.ftpaints.co.uk/ft/terms" className="hover:text-white transition-colors">Terms &amp; Conditions</Link></li>
-              <li><Link href="https://www.ftpaints.co.uk/policy" className="hover:text-white transition-colors">Privacy Policy</Link></li>
+              <li><a href="https://www.ftpaints.co.uk/ft/terms" target="_blank" className="hover:text-white transition-colors">Terms &amp; Conditions</a></li>
+              <li><a href="https://www.ftpaints.co.uk/policy" target="_blank" className="hover:text-white transition-colors">Privacy Policy</a></li>
               <li><Link href="/cookies" className="hover:text-white transition-colors">Cookies</Link></li>
-              <li><Link href="https://www.ftpaints.co.uk/shipping/information" className="hover:text-white transition-colors">Delivery &amp; Returns</Link></li>
+              <li><a href="https://www.ftpaints.co.uk/shipping/information" target="_blank" className="hover:text-white transition-colors">Delivery &amp; Returns</a></li>
               <li>
                 <a href="https://www.ftpaints.co.uk" target="_blank" rel="noopener noreferrer" className="hover:text-white transition-colors">www.ftpaints.co.uk</a>
               </li>

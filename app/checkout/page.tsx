@@ -6,6 +6,7 @@ import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useBasket, type BasketItem } from '@/lib/basketStore';
 import { DELIVERY_PRICING } from '@/lib/delivery';
+import type { StoreCreditInfo } from '@/types/account';
 
 // Resolve the per-unit colour list for a line, falling back to the legacy
 // single-colour fields for baskets persisted before the per-unit change.
@@ -108,6 +109,7 @@ export default function CheckoutPage() {
   const [paymentMethod, setPaymentMethod] = useState<'account' | 'card' | 'bank' | 'collection'>('card');
   const [hasAccountTerms, setHasAccountTerms] = useState(false);
   const [paymentTermName, setPaymentTermName] = useState<string | null>(null);
+  const [storeCredit, setStoreCredit] = useState<StoreCreditInfo | null>(null);
 
   // Check if customer has payment terms set on Odoo (lazy load — not from session)
   useEffect(() => {
@@ -123,6 +125,16 @@ export default function CheckoutPage() {
         setHasAccountTerms(false);
         setPaymentMethod('card');
       });
+  }, [session?.user?.uid]);
+
+  // Display-only — shown so the customer knows they have a balance, but it is
+  // not applied here; they spend it from /account/pay.
+  useEffect(() => {
+    if (!session?.user?.uid) return;
+    fetch('/api/account/store-credit')
+      .then(r => r.json())
+      .then(data => setStoreCredit(data ?? null))
+      .catch(() => setStoreCredit(null));
   }, [session?.user?.uid]);
   const [note, setNote] = useState('');
   const [placing, setPlacing] = useState(false);
@@ -668,6 +680,16 @@ export default function CheckoutPage() {
             {step === 'payment' && (
               <div className="space-y-4">
                 <button onClick={() => setStep(needsSlot ? 'slot' : 'delivery')} className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1">← Back</button>
+
+                {storeCredit && storeCredit.available > 0 && (
+                  <div className="card p-4 flex items-center justify-between gap-3 flex-wrap border-[#c7ddee] bg-[#eef6fc]">
+                    <div>
+                      <p className="font-semibold text-gray-900 text-sm">You have store credit</p>
+                      <p className="text-xs text-gray-500 mt-0.5">Spend it from your account — it isn&apos;t applied to this order</p>
+                    </div>
+                    <span className="text-sm font-bold text-[#004475]">£{storeCredit.available.toFixed(2)} available</span>
+                  </div>
+                )}
 
                 <div className="card p-5">
                   <h2 className="font-bold text-gray-900 mb-4">Payment Method</h2>

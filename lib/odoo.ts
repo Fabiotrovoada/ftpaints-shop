@@ -1578,6 +1578,95 @@ export async function getCustomerPayments(
   } catch { return []; }
 }
 
+// ─── Store credit (credit notes) ─────────────────────────────────────────────
+
+export interface CreditNoteRow {
+  id: number;
+  name: string;
+  invoice_date: string;
+  amount_total: number;
+  amount_residual: number;
+}
+
+/**
+ * Posted credit notes (refunds/returns) for this exact partner_id — same scope
+ * as getInvoices, not the whole trade account. amount_residual on a posted
+ * out_refund is the portion of the credit note not yet applied anywhere, i.e.
+ * the customer's available store credit.
+ */
+export async function getStoreCredit(
+  partnerId: number
+): Promise<{ available: number; creditNotes: CreditNoteRow[] }> {
+  try {
+    const creditNotes = (await jsonrpcCallKw('account.move', 'search_read', [
+      [
+        ['partner_id', '=', partnerId],
+        ['move_type', '=', 'out_refund'],
+        ['state', '=', 'posted'],
+      ],
+      ['id', 'name', 'invoice_date', 'amount_total', 'amount_residual'],
+    ], {
+      order: 'invoice_date desc',
+      context: {},
+    })) as CreditNoteRow[] ?? [];
+    const available = creditNotes.reduce((s, c) => s + c.amount_residual, 0);
+    return { available, creditNotes };
+  } catch { return { available: 0, creditNotes: [] }; }
+}
+
+/**
+ * Applies any available store credit (posted credit notes) against this
+ * partner's outstanding invoices via the same account.move.line reconciliation
+ * mechanism as reconcileStripePaymentWithInvoices below — a credit note's
+ * receivable line is, like a payment's, a credit (amount_residual < 0) against
+ * the Debtors Control Account, so netting it against open invoice lines
+ * (amount_residual > 0) on the same account is exactly the same
+ * action_reconcile call. Odoo nets whatever doesn't fully cancel out and
+ * leaves the correct remainder — no partial-amount math needed here.
+ * Safe to call with nothing to reconcile; it's then a no-op.
+ */
+export async function applyStoreCredit(partnerId: number): Promise<void> {
+  const invoiceIds = (await jsonrpcCallKw('account.move', 'search_read', [
+    [
+      ['partner_id', '=', partnerId],
+      ['move_type', '=', 'out_invoice'],
+      ['state', '=', 'posted'],
+      ['payment_state', 'not in', ['paid', 'in_payment']],
+    ],
+    ['id'],
+  ])) as Array<{ id: number }>;
+  if (!invoiceIds.length) return;
+
+  const creditNoteIds = (await jsonrpcCallKw('account.move', 'search_read', [
+    [
+      ['partner_id', '=', partnerId],
+      ['move_type', '=', 'out_refund'],
+      ['state', '=', 'posted'],
+    ],
+    ['id'],
+  ])) as Array<{ id: number }>;
+  if (!creditNoteIds.length) return;
+
+  const invoiceLines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+    [['move_id', 'in', invoiceIds.map(i => i.id)], ['account_id', '=', 69]],
+    ['id', 'amount_residual', 'reconciled'],
+  ])) as Array<{ id: number; amount_residual: number; reconciled: boolean }>;
+  const openInvoiceLines = invoiceLines.filter(l => !l.reconciled && l.amount_residual > 0);
+  if (!openInvoiceLines.length) return;
+
+  const creditLines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+    [['move_id', 'in', creditNoteIds.map(c => c.id)], ['account_id', '=', 69]],
+    ['id', 'amount_residual', 'reconciled'],
+  ])) as Array<{ id: number; amount_residual: number; reconciled: boolean }>;
+  const openCreditLines = creditLines.filter(l => !l.reconciled && l.amount_residual < 0);
+  if (!openCreditLines.length) return;
+
+  await jsonrpcCallKw('account.move.line', 'action_reconcile', [
+    [...openInvoiceLines.map(l => l.id), ...openCreditLines.map(l => l.id)],
+  ]);
+}
+
+
 // ─── Invoice PDF ──────────────────────────────────────────────────────────────
 
 export async function getInvoicePdf(_uid: number, _password: string, invoiceId: number): Promise<ArrayBuffer> {

@@ -2,7 +2,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
-import type { Invoice } from '@/types/account';
+import type { Invoice, StoreCreditInfo } from '@/types/account';
 
 const money = (n: number) => `£${n.toFixed(2)}`;
 const ukDate = (iso: string) => (iso ? new Date(iso).toLocaleDateString('en-GB') : '—');
@@ -12,12 +12,14 @@ const FILTERS = [
   { key: 'unpaid', label: 'Unpaid' },
   { key: 'overdue', label: 'Overdue' },
   { key: 'paid', label: 'Paid' },
+  { key: 'credits', label: 'Credit Notes' },
 ];
 
 export default function InvoicesPage() {
   const { data: session } = useSession();
   const router = useRouter();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
+  const [storeCredit, setStoreCredit] = useState<StoreCreditInfo | null>(null);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
   const [from, setFrom] = useState('');
@@ -27,9 +29,15 @@ export default function InvoicesPage() {
 
   useEffect(() => {
     if (!session) return;
-    fetch('/api/account/invoices')
-      .then(r => r.json())
-      .then(d => { setInvoices(d.invoices || []); setLoading(false); })
+    Promise.all([
+      fetch('/api/account/invoices').then(r => r.json()),
+      fetch('/api/account/store-credit').then(r => r.json()),
+    ])
+      .then(([invoicesData, storeCreditData]) => {
+        setInvoices(invoicesData.invoices || []);
+        setStoreCredit(storeCreditData ?? null);
+        setLoading(false);
+      })
       .catch(() => setLoading(false));
   }, [session]);
 
@@ -69,26 +77,66 @@ export default function InvoicesPage() {
         ))}
       </div>
 
-      <div className="flex flex-wrap items-end gap-3 mb-4">
-        <label className="text-xs text-gray-500">
-          <span className="block mb-1">From</span>
-          <input type="date" value={from} onChange={e => setFrom(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]" />
-        </label>
-        <label className="text-xs text-gray-500">
-          <span className="block mb-1">To</span>
-          <input type="date" value={to} onChange={e => setTo(e.target.value)}
-            className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]" />
-        </label>
-        {(from || to) && (
-          <button onClick={() => { setFrom(''); setTo(''); }} className="text-sm text-[#004475] font-medium hover:underline pb-2">
-            Clear dates
-          </button>
-        )}
-      </div>
+      {filter !== 'credits' && (
+        <div className="flex flex-wrap items-end gap-3 mb-4">
+          <label className="text-xs text-gray-500">
+            <span className="block mb-1">From</span>
+            <input type="date" value={from} onChange={e => setFrom(e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]" />
+          </label>
+          <label className="text-xs text-gray-500">
+            <span className="block mb-1">To</span>
+            <input type="date" value={to} onChange={e => setTo(e.target.value)}
+              className="border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-[#004475]" />
+          </label>
+          {(from || to) && (
+            <button onClick={() => { setFrom(''); setTo(''); }} className="text-sm text-[#004475] font-medium hover:underline pb-2">
+              Clear dates
+            </button>
+          )}
+        </div>
+      )}
 
       {loading ? (
         <div className="card p-8 text-center text-gray-400">Loading...</div>
+      ) : filter === 'credits' ? (
+        <div className="card overflow-hidden">
+          <div className="border-b border-gray-100 px-4 py-3 bg-gray-50">
+            <p className="text-sm font-semibold text-gray-700">
+              {(storeCredit?.creditNotes.length ?? 0)} credit note{storeCredit?.creditNotes.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+
+          {!storeCredit?.creditNotes.length ? (
+            <p className="px-4 py-8 text-center text-gray-400 text-sm">No credit notes yet</p>
+          ) : (
+            <div className="divide-y divide-gray-100">
+              {storeCredit.creditNotes.map(note => (
+                <div key={note.id} className="px-4 py-3">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-mono font-semibold text-[#004475] text-sm">{note.name}</span>
+                    <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${
+                      note.amount_residual > 0 ? 'bg-[#eef6fc] text-[#004475]' : 'bg-gray-100 text-gray-500'
+                    }`}>
+                      {note.amount_residual > 0 ? 'Available' : 'Used'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-gray-500 mb-2">
+                    <span>Issued: <span className="text-gray-700">{ukDate(note.invoice_date)}</span></span>
+                    <span>Total: <span className="text-gray-800 font-medium">{money(note.amount_total)}</span></span>
+                    {/* <span>Available: <span className="text-[#004475] font-bold">{money(note.amount_residual)}</span></span> */}
+                  </div>
+                  <button
+                    onClick={() => window.open(`/api/account/invoices/${note.id}/pdf`, '_blank')}
+                    className="w-full text-xs bg-gray-100 text-gray-700 py-2 rounded-lg hover:bg-[#004475] hover:text-white font-medium transition-colors"
+                  >
+                    📄 Credit Note PDF
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       ) : (
         <div className="card overflow-hidden">
           <div className="border-b border-gray-100 px-4 py-3 flex items-center justify-between bg-gray-50 flex-wrap gap-2">

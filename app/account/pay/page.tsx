@@ -18,13 +18,34 @@ function PayPageInner() {
   const [payMethod, setPayMethod] = useState<'card' | 'bank'>('card');
   const [processing, setProcessing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [creditApplied, setCreditApplied] = useState(0);
 
   useEffect(() => {
     if (!session) return;
     fetch('/api/account/invoices')
       .then(r => r.json())
-      .then(d => {
-        const unpaid = (d.invoices || []).filter((i: Invoice) => i.amount_residual > 0);
+      .then(async d => {
+        const before = (d.invoices || []) as Invoice[];
+        const beforeResidual = before.reduce((s, i) => s + i.amount_residual, 0);
+
+        let unpaid = before.filter(i => i.amount_residual > 0);
+        // Store credit auto-applies here (not on the dashboard) since this
+        // page's whole purpose is settling the account — see
+        // applyStoreCredit in lib/odoo.ts. Safe to call even with nothing to
+        // apply; it's then a no-op.
+        if (unpaid.length) {
+          try {
+            const applyRes = await fetch('/api/account/store-credit/apply', { method: 'POST' });
+            const applyData = await applyRes.json();
+            if (Array.isArray(applyData.invoices)) {
+              const after = applyData.invoices as Invoice[];
+              const afterResidual = after.reduce((s: number, i: Invoice) => s + i.amount_residual, 0);
+              setCreditApplied(Math.max(0, beforeResidual - afterResidual));
+              unpaid = after.filter(i => i.amount_residual > 0);
+            }
+          } catch { /* credit application is best-effort; fall back to the original list */ }
+        }
+
         setInvoices(unpaid);
         // Pre-select: specific invoice or all
         if (preselect) {
@@ -113,6 +134,12 @@ function PayPageInner() {
 
         <h1 className="text-2xl font-bold text-gray-900 mb-1">Pay Invoices</h1>
         <p className="text-gray-500 text-sm mb-6">Select which invoices to pay, then choose your payment method</p>
+
+        {!loading && creditApplied > 0 && (
+          <div className="bg-green-50 border border-green-200 text-green-700 text-sm rounded-lg px-4 py-3 mb-6">
+            🎉 £{creditApplied.toFixed(2)} store credit applied to your invoices
+          </div>
+        )}
 
         {loading ? (
           <div className="card p-12 text-center text-gray-400">Loading invoices...</div>
