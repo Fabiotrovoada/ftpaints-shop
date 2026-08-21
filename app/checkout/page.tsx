@@ -819,7 +819,7 @@ export default function CheckoutPage() {
                   )}
                 </button>
                 <p className="text-xs text-center text-gray-400">
-                  {paymentMethod === 'account' ? 'Invoice raised on despatch — 30 day payment terms apply' :
+                  {paymentMethod === 'account' ? 'Invoice raised on order confirmation — 30 day payment terms apply' :
                    paymentMethod === 'bank' ? 'Order confirmed when payment received (1-2 working days)' :
                    'Secure payment processed by Stripe'}
                 </p>

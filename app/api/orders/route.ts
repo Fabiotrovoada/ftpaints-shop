@@ -3,7 +3,16 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import {
   createSaleOrder, confirmSaleOrderIfDraft, getPartnerByUid, OrderLineError, type OrderLineInput,
+  getSaleOrderLines, createOdooDraftInvoice, postInvoiceIfDraft, type OdooInvoiceLine,
 } from '@/lib/odoo';
+
+interface SaleOrderLine {
+  id: number;
+  product_id?: [number, string] | false;
+  product_uom_qty: number;
+  price_unit: number;
+  name: string;
+}
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -45,6 +54,34 @@ export async function POST(req: NextRequest) {
     // funds actually arrived, per its own checkout copy.
     if (paymentMethod === 'account' || paymentMethod === 'collection') {
       await confirmSaleOrderIfDraft(order.id);
+    }
+
+    // Pay on Account is an invoice on credit terms, not a payment — raise and
+    // post it immediately so it shows up for the customer to pay via
+    // /account/pay and on their statement, instead of staff having to create
+    // it manually in Odoo. A failure here must not fail order placement: the
+    // sales order above is already confirmed, so we log and let staff invoice
+    // it by hand as before, rather than showing the customer a failed order
+    // that actually went through.
+    if (paymentMethod === 'account') {
+      try {
+        const orderLines = (await getSaleOrderLines(uid, password, order.id)) as SaleOrderLine[];
+        if (orderLines.length) {
+          const invoiceLines: OdooInvoiceLine[] = orderLines.map(l => ({
+            product_id: Array.isArray(l.product_id) ? l.product_id[0] : undefined,
+            name: l.name,
+            quantity: l.product_uom_qty,
+            price_unit: l.price_unit,
+            sale_line_ids: [l.id],
+          }));
+          const invoiceId = await createOdooDraftInvoice(partnerId, invoiceLines, order.name);
+          await postInvoiceIfDraft(invoiceId);
+        } else {
+          console.error(`[ORDERS] Order ${order.name || order.id} confirmed but its lines could not be read back — invoice not created`);
+        }
+      } catch (invoiceErr) {
+        console.error(`[ORDERS] Failed to auto-invoice order ${order.name || order.id}:`, invoiceErr);
+      }
     }
 
     // `repriced` lets checkout tell the customer their basket total moved rather

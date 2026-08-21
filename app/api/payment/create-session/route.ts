@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import {
   createSaleOrder, getSaleOrderLines, getPartnerByUid, createOdooDraftInvoice,
-  OrderLineError, type OrderLineInput, type OdooInvoiceLine,
+  OrderLineError, type OrderLineInput, type OdooInvoiceLine, jsonrpcCallKw,
 } from '@/lib/odoo';
 import { deliveryCost } from '@/lib/delivery';
 
@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const { amount, description, customerEmail, lines, reference, note, deliveryMethod } = await req.json();
+  const { amount, description, customerEmail, lines, reference, note, deliveryMethod, invoiceIds } = await req.json();
 
   if (!process.env.STRIPE_SECRET_KEY || process.env.STRIPE_SECRET_KEY.includes('YOUR_KEY')) {
     return NextResponse.json({ error: 'Stripe not configured' }, { status: 503 });
@@ -49,6 +49,7 @@ export async function POST(req: NextRequest) {
     let orderMeta = '';
     let odooInvoiceId: number | undefined;
     let odooOrderId: number | undefined;
+    let odooInvoiceIds: number[] | undefined;
 
     if (lines?.length) {
       // New order paid by card at checkout. The sale order and a draft invoice
@@ -131,6 +132,54 @@ export async function POST(req: NextRequest) {
         q: l.product_uom_qty,
         p: l.price_unit,
       }))).substring(0, 400);
+    } else if (invoiceIds) {
+      // Paying off existing invoices from /account/pay. The client sends which
+      // invoices it thinks it's paying and their summed total, but both are
+      // untrusted input — re-verify ownership and the real outstanding amount
+      // against Odoo before charging anything, so a tampered request can't
+      // pay someone else's invoice or charge less than what's actually owed.
+      if (!Array.isArray(invoiceIds) || invoiceIds.length === 0
+        || !invoiceIds.every((id: unknown) => Number.isInteger(id) && (id as number) > 0)) {
+        return NextResponse.json({ error: 'Invalid invoice selection' }, { status: 400 });
+      }
+
+      const uid = session.user.uid;
+      const user = await getPartnerByUid(uid, '');
+      const partnerId = (user?.partner_id as [number, string])?.[0];
+      if (!partnerId) return NextResponse.json({ error: 'Partner not found' }, { status: 400 });
+
+      const invoiceRows = (await jsonrpcCallKw('account.move', 'search_read', [
+        [
+          ['id', 'in', invoiceIds],
+          ['partner_id', '=', partnerId],
+          ['state', '=', 'posted'],
+          ['move_type', '=', 'out_invoice'],
+        ],
+        ['id', 'amount_residual'],
+      ])) as Array<{ id: number; amount_residual: number }>;
+
+      if (invoiceRows.length !== invoiceIds.length) {
+        return NextResponse.json({ error: 'One or more invoices could not be found on your account' }, { status: 400 });
+      }
+
+      const serverAmount = invoiceRows.reduce((s, r) => s + r.amount_residual, 0);
+      if (Math.abs(serverAmount - Number(amount)) > 0.01) {
+        return NextResponse.json({ error: 'Amount no longer matches your outstanding balance — please refresh and try again' }, { status: 400 });
+      }
+
+      odooInvoiceIds = invoiceIds as number[];
+      if (!reference) {
+        orderReference = `PAY-${odooInvoiceIds.length}INV-${odooInvoiceIds[0]}`;
+      }
+
+      lineItems = [{
+        price_data: {
+          currency: 'gbp',
+          product_data: { name: description || `Payment for ${odooInvoiceIds.length} invoice${odooInvoiceIds.length !== 1 ? 's' : ''}` },
+          unit_amount: Math.round(serverAmount * 100),
+        },
+        quantity: 1,
+      }];
     } else {
       lineItems = [{
         price_data: {
@@ -152,6 +201,15 @@ export async function POST(req: NextRequest) {
     };
     if (odooInvoiceId) metadata.odoo_invoice_id = String(odooInvoiceId);
     if (odooOrderId) metadata.odoo_order_id = String(odooOrderId);
+    if (odooInvoiceIds?.length) {
+      const idsJson = JSON.stringify(odooInvoiceIds);
+      // Reject rather than truncate — a truncated JSON array would silently
+      // drop invoices from reconciliation once Stripe metadata is read back.
+      if (idsJson.length > 480) {
+        return NextResponse.json({ error: 'Too many invoices selected for a single payment' }, { status: 400 });
+      }
+      metadata.odoo_invoice_ids = idsJson;
+    }
 
     const checkoutSession = await stripe.checkout.sessions.create({
       payment_method_types: ['card'],

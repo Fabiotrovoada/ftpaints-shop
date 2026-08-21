@@ -63,7 +63,7 @@ function PayPageInner() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           amount: totalToPay,
-          invoiceIds: selectedInvoices.map(i => i.name),
+          invoiceIds: selectedInvoices.map(i => i.id),
           description: selectedInvoices.length === 1
             ? `Invoice ${selectedInvoices[0].name}`
             : `${selectedInvoices.length} invoices — FTPaints`,

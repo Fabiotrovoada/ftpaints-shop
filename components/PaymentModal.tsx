@@ -50,7 +50,7 @@ export default function PaymentModal({ invoices, totalOutstanding, customerEmail
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           amount: selectedTotal,
-          invoiceIds: selectedNames,
+          invoiceIds: unpaidInvoices.filter(i => selectedIds.includes(i.id)).map(i => i.id),
           description: `FTPaints Invoice Payment — ${selectedNames.join(', ')}`,
           customerEmail,
         }),

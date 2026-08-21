@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse, after } from 'next/server';
 import Stripe from 'stripe';
-import { jsonrpcCallKw, reconcileStripePaymentWithInvoice, postInvoiceIfDraft, confirmSaleOrderIfDraft } from '@/lib/odoo';
+import {
+  jsonrpcCallKw, reconcileStripePaymentWithInvoice, reconcileStripePaymentWithInvoices,
+  postInvoiceIfDraft, confirmSaleOrderIfDraft,
+} from '@/lib/odoo';
 
 export async function POST(req: NextRequest) {
   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!, {
@@ -58,9 +61,20 @@ async function processSession(session: Stripe.Checkout.Session) {
   const paymentId = stripePaymentId || `cs_${session.id}`;
   const odooInvoiceId = metadata.odoo_invoice_id ? Number(metadata.odoo_invoice_id) : undefined;
   const odooOrderId = metadata.odoo_order_id ? Number(metadata.odoo_order_id) : undefined;
+  let odooInvoiceIds: number[] | undefined;
+  if (metadata.odoo_invoice_ids) {
+    try {
+      const parsed = JSON.parse(metadata.odoo_invoice_ids);
+      if (Array.isArray(parsed) && parsed.every(n => Number.isInteger(n))) odooInvoiceIds = parsed;
+    } catch {
+      console.warn('[WEBHOOK] Could not parse odoo_invoice_ids metadata:', metadata.odoo_invoice_ids);
+    }
+  }
 
   if (odooInvoiceId) {
     await reconcileKnownInvoice(customerEmail, amount, paymentId, saleReference, odooInvoiceId, odooOrderId);
+  } else if (odooInvoiceIds?.length) {
+    await reconcileExistingInvoices(customerEmail, amount, paymentId, saleReference, odooInvoiceIds);
   } else {
     await reconcile(customerEmail, amount, paymentId, saleReference);
   }
@@ -99,6 +113,37 @@ async function reconcileKnownInvoice(
   );
 
   console.log(`[WEBHOOK] ✅ Reconciled invoice ${invoiceId} (order ${saleReference}) with payment ${stripePaymentId}`);
+}
+
+/**
+ * Paying off existing invoices from /account/pay. The invoice ids travel in
+ * Stripe metadata (set by create-session after verifying ownership/amount),
+ * so — unlike reconcile() below — there's no need to guess which invoice(s)
+ * this payment is for. Invoices here are already posted, so no draft-posting
+ * or sale order confirmation is needed, unlike the checkout flow above.
+ */
+async function reconcileExistingInvoices(
+  customerEmail: string, amount: number, stripePaymentId: string, saleReference: string,
+  invoiceIds: number[]
+) {
+  const partners = (await jsonrpcCallKw('res.partner', 'search_read', [
+    [['email', '=', customerEmail]],
+    ['id', 'name'],
+  ], { limit: 1 })) as Array<{ id: number; name: string }>;
+
+  if (!partners.length) {
+    console.log(`[WEBHOOK] No partner found for email ${customerEmail}, skipping`);
+    return;
+  }
+
+  const partnerId = partners[0].id;
+  const partnerName = partners[0].name;
+
+  await reconcileStripePaymentWithInvoices(
+    invoiceIds, partnerId, amount, stripePaymentId, saleReference, partnerName
+  );
+
+  console.log(`[WEBHOOK] ✅ Reconciled ${invoiceIds.length} invoice(s) with payment ${stripePaymentId}`);
 }
 
 async function reconcile(customerEmail: string, amount: number, stripePaymentId: string, saleReference: string) {

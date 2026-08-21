@@ -1904,6 +1904,152 @@ export async function reconcileStripePaymentWithInvoice(
   return { payment_id: paymentId, invoice_id: invoiceId };
 }
 
+/**
+ * Reconcile a single Stripe payment against several Odoo invoices at once —
+ * used when a client pays off multiple outstanding invoices in one checkout.
+ * Structurally parallel to reconcileStripePaymentWithInvoice (kept separate
+ * rather than shared, since that function encodes a hard-won production fix
+ * for mismatched-account payments and shouldn't be touched), but reconciles
+ * every invoice's receivable line against the one payment line in a single
+ * action_reconcile call — Odoo nets an arbitrary set of same-account lines
+ * together, so this settles all of them as long as they sum to the payment.
+ */
+export async function reconcileStripePaymentWithInvoices(
+  invoiceIds: number[],
+  partnerId: number,
+  amount: number,
+  stripePaymentReference: string,
+  saleReference?: string,
+  partnerName?: string
+): Promise<{ payment_id: number; invoice_ids: number[] }> {
+  // Step 1: Try to find existing account.payment by memo (where Odoo stores Stripe PI)
+  let payments = (await jsonrpcCallKw('account.payment', 'search_read', [
+    [['memo', 'ilike', stripePaymentReference]],
+    ['id', 'state', 'amount', 'memo', 'is_reconciled'],
+  ])) as Array<{ id: number; state: string; amount: number; memo: string; is_reconciled: boolean }>;
+
+  if (!payments.length && saleReference) {
+    payments = (await jsonrpcCallKw('account.payment', 'search_read', [
+      [['memo', 'ilike', saleReference]],
+      ['id', 'state', 'amount', 'memo', 'is_reconciled'],
+    ])) as Array<{ id: number; state: string; amount: number; memo: string; is_reconciled: boolean }>;
+  }
+
+  let paymentId: number;
+
+  if (payments.length > 0) {
+    paymentId = payments[0].id;
+    console.log(`[ODOO] Found payment ${paymentId} (${payments[0].memo}) for ref ${stripePaymentReference}`);
+
+    if (payments[0].is_reconciled) {
+      console.log(`[ODOO] Payment ${paymentId} already reconciled, skipping`);
+      return { payment_id: paymentId, invoice_ids: invoiceIds };
+    }
+  } else {
+    console.log(`[ODOO] No account.payment found for ${stripePaymentReference}, creating it`);
+
+    const memoParts = [saleReference || 'Stripe'];
+    if (partnerName) memoParts.push(partnerName);
+    memoParts.push(stripePaymentReference);
+    const memo = memoParts.join(' - ');
+
+    paymentId = (await jsonrpcCallKw('account.payment', 'create', [{
+      payment_type: 'inbound',
+      partner_type: 'customer',
+      partner_id: partnerId,
+      amount,
+      currency_id: 143, // GBP
+      journal_id: 34, // Stripe Online Payments
+      memo,
+    }])) as number;
+
+    console.log(`[ODOO] Created account.payment ${paymentId} with memo: ${memo}`);
+
+    await jsonrpcCallKw('account.payment', 'action_post', [[paymentId]]);
+    console.log(`[ODOO] Posted payment ${paymentId}`);
+  }
+
+  // Step 2: Find every invoice's receivable line (amount_residual > 0, positive)
+  const invoiceLines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+    [['move_id', 'in', invoiceIds], ['account_id', '=', 69]], // 69 = Debtors Control Account
+    ['id', 'move_id', 'amount_residual', 'reconciled'],
+  ])) as Array<{ id: number; move_id: [number, string]; amount_residual: number; reconciled: boolean }>;
+
+  const invoiceReceivables = invoiceLines.filter(l => !l.reconciled && l.amount_residual > 0);
+
+  if (invoiceReceivables.length < invoiceIds.length) {
+    // Some invoice's residual changed between page load and payment (e.g.
+    // already settled another way) — reconcile whatever is still open and
+    // let Odoo's own engine net it; don't hand-roll partial-amount logic.
+    console.warn(`[ODOO] Only ${invoiceReceivables.length}/${invoiceIds.length} invoices still had an open receivable line`, { invoiceIds });
+  }
+
+  // Step 3: Find the payment's receivable line (amount_residual < 0, negative)
+  const paymentLines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+    [['payment_id', '=', paymentId], ['account_id', '=', 69]],
+    ['id', 'amount_residual', 'reconciled'],
+  ])) as Array<{ id: number; amount_residual: number; reconciled: boolean }>;
+
+  const paymentReceivable = paymentLines.find(l => !l.reconciled && l.amount_residual < 0);
+
+  // Step 4: Reconcile every invoice line together with the payment line in one call
+  if (invoiceReceivables.length && paymentReceivable) {
+    await jsonrpcCallKw('account.move.line', 'action_reconcile', [
+      [...invoiceReceivables.map(l => l.id), paymentReceivable.id],
+    ]);
+    console.log(`[ODOO] Reconciled ${invoiceReceivables.length} invoice line(s) with payment line ${paymentReceivable.id}`);
+  } else if (invoiceReceivables.length && !paymentReceivable) {
+    // Payment exists but its debtors line is reconciled to wrong account (Odoo bug)
+    console.log(`[ODOO] Existing payment ${paymentId} reconciled to wrong account — creating corrected payment`);
+    const newPmtId = (await jsonrpcCallKw('account.payment', 'create', [{
+      payment_type: 'inbound',
+      partner_type: 'customer',
+      partner_id: partnerId,
+      amount,
+      journal_id: 34, // Stripe Online Payments
+      memo: `Corrected ${stripePaymentReference} for ${invoiceIds.length} invoices`,
+    }])) as number;
+    await jsonrpcCallKw('account.payment', 'action_post', [[newPmtId]]);
+
+    const newPmtLines = (await jsonrpcCallKw('account.move.line', 'search_read', [
+      [['payment_id', '=', newPmtId], ['account_id', '=', 69]],
+      ['id'],
+    ])) as Array<{ id: number }>;
+    if (newPmtLines.length > 0) {
+      await jsonrpcCallKw('account.move.line', 'action_reconcile', [
+        [...invoiceReceivables.map(l => l.id), newPmtLines[0].id],
+      ]);
+      console.log(`[ODOO] Reconciled with corrected payment ${newPmtId}`);
+      paymentId = newPmtId;
+    }
+  } else if (!invoiceReceivables.length) {
+    console.log(`[ODOO] Invoices already reconciled`, { invoiceIds });
+  } else {
+    console.warn('[ODOO] Could not reconcile — lines not found', { invoiceIds, paymentReceivable: paymentReceivable?.id });
+  }
+
+  // Step 5: Post a Stripe payment confirmation message to each invoice's chatter.
+  // No sale.order chatter update here — a consolidated invoice payment has no
+  // real sale order behind it, unlike the single-invoice checkout flow.
+  const paymentMsg = `Stripe payment of ${amount.toFixed(2)} confirmed${saleReference ? ` (Ref: ${saleReference})` : ''}. Transaction: ${stripePaymentReference}`;
+  for (const line of invoiceReceivables) {
+    const invoiceId = line.move_id[0];
+    try {
+      await jsonrpcCallKw('mail.message', 'create', [{
+        body: paymentMsg,
+        model: 'account.move',
+        res_id: invoiceId,
+        message_type: 'notification',
+      }]);
+      console.log(`[ODOO] Posted payment message to invoice ${invoiceId}`);
+    } catch (e: unknown) {
+      console.warn(`[ODOO] Could not post message to invoice ${invoiceId} chatter: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
+  return { payment_id: paymentId, invoice_ids: invoiceIds };
+}
+
 // ─── Pricelist ────────────────────────────────────────────────────────────────
 
 // The rule types and the engine itself live in lib/pricelist.ts, which is pure
