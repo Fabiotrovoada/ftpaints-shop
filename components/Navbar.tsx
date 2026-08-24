@@ -4,6 +4,8 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
 import { useBasket } from '@/lib/basketStore';
+import SearchModal from './SearchModal';
+import { Search } from 'lucide-react';
 
 function CreditBadge() {
   const [credit, setCredit] = useState<{ limit: number; used: number; onStop: boolean } | null>(null);
@@ -30,6 +32,9 @@ export default function Navbar() {
   const pathname = usePathname();
   const { itemCount } = useBasket();
   const [menuOpen, setMenuOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  // /shop has its own inline search bar — avoid a redundant second one here
+  const showSearch = pathname !== '/shop';
 
   const navLinks = [
     { href: '/shop', label: 'Shop' },
@@ -64,6 +69,17 @@ export default function Navbar() {
 
           {/* Right side */}
           <div className="flex items-center gap-3">
+            {/* Search */}
+            {showSearch && (
+              <button
+                onClick={() => setSearchOpen(true)}
+                className="p-2 hover:text-[#ff8f00] transition-colors"
+                aria-label="Search"
+              >
+                <Search size={20} />
+              </button>
+            )}
+
             {/* Basket */}
             <Link href="/basket" className="relative p-2 hover:text-[#ff8f00] transition-colors">
               <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -132,6 +148,8 @@ export default function Navbar() {
           </button>
         </div>
       )}
+
+      {searchOpen && <SearchModal onClose={() => setSearchOpen(false)} />}
     </nav>
   );
 }

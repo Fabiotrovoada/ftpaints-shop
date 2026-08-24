@@ -205,11 +205,16 @@ export async function authenticate(
 // ─── Partner ─────────────────────────────────────────────────────────────────
 
 export async function getPartnerByUid(uid: number, _password: string): Promise<Record<string, unknown>> {
+  const key = `user:${uid}`;
+  const hit = cacheGet<Record<string, unknown>>(key);
+  if (hit) return hit;
   try {
     const rows = (await jsonrpcCallKw('res.users', 'read', [[uid]], {
       fields: ['name', 'email', 'partner_id', 'company_id'],
     })) as Record<string, unknown> | null;
-    return rows ?? {};
+    const result = rows ?? {};
+    cacheSet(key, result, TTL.PARTNER);
+    return result;
   } catch { return {}; }
 }
 
@@ -852,21 +857,27 @@ export async function getProductById(_uid: number, _password: string, id: number
   if (!product || !product.id) return null;
   const normalized = normalizeMobileProduct(product);
 
-  // Fetch real stock quantity via JSON-RPC (more accurate than Mobile API boolean)
-  try {
-    const stockData = await jsonrpcCallKw('product.template', 'read', [[id]], {
-      fields: ['qty_available', 'virtual_available'],
-    }) as Record<string, unknown> | null;
-    if (stockData && typeof stockData.qty_available === 'number') {
-      normalized.qty_available = Math.floor(stockData.qty_available);
-      normalized.virtual_available = typeof stockData.virtual_available === 'number'
-        ? Math.floor(stockData.virtual_available)
-        : normalized.qty_available;
-    }
-  } catch { /* fall back to Mobile API stock status */ }
+  // Template and per-variant stock come from independent RPCs once `id` (and,
+  // for variants, `normalized.variant_ids` from the mobile fetch above) is
+  // known — run them concurrently instead of paying two round trips in series.
+  const templateStockPromise = (async () => {
+    // Fetch real stock quantity via JSON-RPC (more accurate than Mobile API boolean)
+    try {
+      const stockData = await jsonrpcCallKw('product.template', 'read', [[id]], {
+        fields: ['qty_available', 'virtual_available'],
+      }) as Record<string, unknown> | null;
+      if (stockData && typeof stockData.qty_available === 'number') {
+        normalized.qty_available = Math.floor(stockData.qty_available);
+        normalized.virtual_available = typeof stockData.virtual_available === 'number'
+          ? Math.floor(stockData.virtual_available)
+          : normalized.qty_available;
+      }
+    } catch { /* fall back to Mobile API stock status */ }
+  })();
 
-  // Fetch per-variant stock quantities via JSON-RPC
-  if (normalized.variant_ids && normalized.variant_ids.length > 0) {
+  const variantStockPromise = (async () => {
+    // Fetch per-variant stock quantities via JSON-RPC
+    if (!normalized.variant_ids || normalized.variant_ids.length === 0) return;
     const variantIds = normalized.variant_ids.map((v: { id: number }) => v.id);
     try {
       // standard_price rides along on a read that was happening anyway — cost is
@@ -900,7 +911,9 @@ export async function getProductById(_uid: number, _password: string, id: number
       console.error('Variant stock fetch failed:', e instanceof Error ? e.message : e);
       /* variants without per-unit stock — template-level stock is shown */
     }
-  }
+  })();
+
+  await Promise.all([templateStockPromise, variantStockPromise]);
 
   await applyAlwaysInStock([normalized as unknown as Record<string, unknown>]);
 
@@ -952,6 +965,39 @@ export async function getTags(): Promise<Tag[]> {
   }) as Array<{ id: number; name: string }>;
 
   if (!tagsData || tagsData.length === 0) return [];
+
+  // One read_group grouped by the many2many tag field replaces the old
+  // one-search_count-per-tag loop (N RPCs -> 1). Odoo's count key in a
+  // read_group bucket varies by version (`<field>_count` pre-v17, `__count`
+  // on v17+), so accept either; if neither is present for any bucket, fall
+  // back to the previous per-tag counting so tags don't silently disappear.
+  try {
+    const groups = await jsonrpcCallKw('product.template', 'read_group', [
+      [],
+      ['product_tag_ids'],
+      ['product_tag_ids'],
+    ]) as Array<Record<string, unknown>>;
+
+    const countByTagId = new Map<number, number>();
+    let sawCount = false;
+    for (const group of groups) {
+      const tagField = group['product_tag_ids'];
+      const tagId = Array.isArray(tagField) ? (tagField[0] as number) : null;
+      if (tagId == null) continue;
+      const count = (group['product_tag_ids_count'] ?? group['__count']) as number | undefined;
+      if (typeof count === 'number') {
+        sawCount = true;
+        countByTagId.set(tagId, count);
+      }
+    }
+
+    if (sawCount) {
+      return tagsData
+        .map(tag => ({ id: tag.id, name: tag.name, product_count: countByTagId.get(tag.id) ?? 0 }))
+        .filter(t => t.product_count > 0)
+        .sort((a, b) => a.name.localeCompare(b.name));
+    }
+  } catch { /* fall through to per-tag counting below */ }
 
   // For each tag, count products that have it
   const tagsWithCounts = await Promise.all(
@@ -1059,7 +1105,7 @@ export async function getSaleOrders(_uid: number, _password: string, partnerId: 
     // Include all states: draft=Quotation, sent=Quotation Sent, sale=Confirmed, done=Done, cancel=Cancelled
     return (await jsonrpcCallKw('sale.order', 'search_read', [
       [['partner_id', 'child_of', commercialId]],
-      ['id', 'name', 'date_order', 'amount_total', 'state', 'order_line', 'note'],
+      ['id', 'name', 'date_order', 'amount_total', 'state'],
     ], {
       order: 'date_order desc',
       limit: 100,

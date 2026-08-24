@@ -32,12 +32,14 @@ export async function GET(
     const owns = await assertOwnsRecord('sale.order', orderId, commercialId);
     if (!owns) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    const order = await jsonrpcCallKw('sale.order', 'read', [[orderId]], {
-      fields: ['id', 'name', 'date_order', 'amount_total', 'amount_untaxed', 'amount_tax', 'state', 'note'],
-    }) as Record<string, unknown> | null;
+    const [order, lines] = await Promise.all([
+      jsonrpcCallKw('sale.order', 'read', [[orderId]], {
+        fields: ['id', 'name', 'date_order', 'amount_total', 'amount_untaxed', 'amount_tax', 'state', 'note'],
+      }) as Promise<Record<string, unknown> | null>,
+      getSaleOrderLines(session.user.uid, '', orderId),
+    ]);
     if (!order) return NextResponse.json({ error: 'Not found' }, { status: 404 });
 
-    const lines = await getSaleOrderLines(session.user.uid, '', orderId);
     return NextResponse.json({ order, lines });
   } catch {
     return NextResponse.json({ error: 'Could not load order' }, { status: 500 });

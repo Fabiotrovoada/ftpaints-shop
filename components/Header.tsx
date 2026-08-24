@@ -1,10 +1,13 @@
 'use client';
 import Link from 'next/link';
+import { useState } from 'react';
 import { useCart } from './CartContext';
-import { ShoppingCart } from 'lucide-react';
+import SearchModal from './SearchModal';
+import { Search, ShoppingCart } from 'lucide-react';
 
 export default function Header() {
   const { count, total } = useCart();
+  const [searchOpen, setSearchOpen] = useState(false);
 
   return (
     <header className="bg-[#004475] text-white shadow-lg sticky top-0 z-50">
@@ -24,20 +27,33 @@ export default function Header() {
           <Link href="/orders" className="hover:text-[#f97316] transition-colors">My Orders</Link>
         </nav>
 
-        {/* Cart */}
-        <Link href="/basket" className="flex items-center gap-2 bg-[#f97316] hover:bg-[#ea6c10] transition-colors px-4 py-2 rounded-lg font-semibold text-sm">
-          <ShoppingCart size={18} />
-          <span>Basket</span>
-          {count > 0 && (
-            <span className="bg-white text-[#004475] text-xs font-bold px-2 py-0.5 rounded-full">
-              {count}
-            </span>
-          )}
-          {total > 0 && (
-            <span className="text-white/90">£{total.toFixed(2)}</span>
-          )}
-        </Link>
+        <div className="flex items-center gap-3">
+          {/* Search */}
+          <button
+            onClick={() => setSearchOpen(true)}
+            className="p-2 hover:text-[#f97316] transition-colors"
+            aria-label="Search"
+          >
+            <Search size={20} />
+          </button>
+
+          {/* Cart */}
+          <Link href="/basket" className="flex items-center gap-2 bg-[#f97316] hover:bg-[#ea6c10] transition-colors px-4 py-2 rounded-lg font-semibold text-sm">
+            <ShoppingCart size={18} />
+            <span>Basket</span>
+            {count > 0 && (
+              <span className="bg-white text-[#004475] text-xs font-bold px-2 py-0.5 rounded-full">
+                {count}
+              </span>
+            )}
+            {total > 0 && (
+              <span className="text-white/90">£{total.toFixed(2)}</span>
+            )}
+          </Link>
+        </div>
       </div>
+
+      {searchOpen && <SearchModal onClose={() => setSearchOpen(false)} />}
     </header>
   );
 }
